@@ -1,0 +1,6 @@
+.luacheckrc
+.stylua.toml
+.github/
+.git/
+*.md
+LICENSE
