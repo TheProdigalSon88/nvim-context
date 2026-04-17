@@ -1,19 +1,9 @@
 local M = {}
 
+---@param opts Context.Options
 M.setup = function(opts)
-  vim.validate({
-    option = { opts.option, { "string", "nil" } },
-  })
-
-  local config = vim.tbl_deep_extend("force", {
-    option = "default",
-  }, opts or {})
-
-  require("nvim-context.config").set(config)
+  require("nvim-context").setup(opts)
 end
 
-M.some_function = function()
-  return require("nvim-context.config").get().option
-end
-
+---@type Context
 return M

@@ -1,17 +1,26 @@
 local M = {}
 
-local defaults = {
-  option = "default",
+---@type Context.Options
+M.defaults = {
+  repo = {
+    dir_name = ".context-repo",
+    enable = false
+  },
+  personal = {
+    dir_name = ".context-repo",
+    enable = false
+  }
 }
 
-M.options = vim.deepcopy(defaults)
+---@type Context.Options
+---@diagnostic disable-next-line: missing-fields
+M.options = {}
 
-M.set = function(opts)
-  M.options = vim.tbl_deep_extend("force", M.options, opts or {})
+---Extend the defaults options table with the user options
+---@param opts Ctx.Options Plugin options
+M.setup = function(opts)
+  M.options = vim.tbl_deep_extend("force", {}, M.defaults, opts or {})
 end
 
-M.get = function()
-  return M.options
-end
-
+---@type Context.Config
 return M
