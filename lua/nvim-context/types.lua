@@ -1,21 +1,37 @@
 ---@meta
 
----@class Context
----@field setup fun(opts: Ctx.Options): nil
+---See :h nvim_create_user_command
+---@class Context.vim.user_command
+---@field name string
+---@field args string
+---@field fargs table
+---@field nargs string
+---@field bang boolean
+---@field line1 number
+---@field line2 number
+---@field range number
+---@field count number
+---@field reg? string
+---@field mods? string
+---@field smods table
 
----@class Context.Options
----@field repo Context.Options.Repo
----@field personal Context.Options.Personal
+---@class Context.File
+---@field selection fun(): Context.File.selection? Selected lines as quickfix/loclist item
+---@field highlight fun(item: Context.File.selection, timeout: integer?): nil Highlight quickfix/loclist item
 
----@class Context.Options.Repo
----@field dir_name string
----@field enable boolean
-
----@class Context.Options.Personal
----@field dir_name string
----@field enable boolean
-
----@class Context.Config
----@field defaults Context.Options: Default options
----@field options Context.Options: User options
----@field setup fun(opts: Context.Options): nil Extend the defaults options table with the user options
+---Represents an item in a Neovim quickfix/loclist.
+---@class Context.File.selection
+---@field bufnr integer The buffer number where the item originates.
+---@field filename? string
+---@field lnum integer The start line number for the item.
+---@field end_lnum? integer The end line number for the item.
+---@field pattern string A pattern related to the item. It can be a search pattern or any relevant string.
+---@field col? integer The column number where the item starts.
+---@field end_col? integer The column number where the item ends.
+---@field module? string Module information (if any) associated with the item.
+---@field nr? integer A unique number or ID for the item.
+---@field text string A description or message related to the item.
+---@field type? string The type of the item. E.g., "W" might stand for "Warning".
+---@field valid integer A flag indicating if the item is valid (1) or not (0).
+---@field user_data? any Any user data associated with the item.
+---@field vcol? integer Visual column number. Indicates if the column number is a visual column number (when set to 1) or a byte index (when set to 0).
