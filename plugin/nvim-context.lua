@@ -6,6 +6,12 @@ vim.api.nvim_create_user_command(
   function(opts)
     local context = require("nvim-context")
     local subcommand = opts.fargs[1]
+    local exists = context.check_and_create()
+
+    if not exists then
+      vim.notify("Failure creating context dir and it does not exists , check file permissions", vim.log.levels.ERROR)
+      return
+    end
 
     if not subcommand then
       context.toggle()
@@ -13,11 +19,11 @@ vim.api.nvim_create_user_command(
     end
 
     local fn = context[subcommand]
-    if type(fn) == "function" then
-      fn(unpack(opts.fargs, 2))
-    else
+    if type(fn) ~= "function" then
       vim.notify("Context: unknown subcommand '" .. subcommand .. "'", vim.log.levels.ERROR)
+      return
     end
+    fn()
   end,
   {
     desc = "Context",
