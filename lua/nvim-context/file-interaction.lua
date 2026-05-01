@@ -11,12 +11,8 @@ File.selection = function()
 
     start_line = vim.fn.getpos("'<")[2]
     end_line = vim.fn.getpos("'>")[2]
-  elseif mode == "n" then
-    local cursor = vim.api.nvim_win_get_cursor(0)
-    start_line = cursor[1]
-    end_line = cursor[1]
   else
-    vim.notify("selection must be called in normal or visual mode", vim.log.levels.INFO)
+    vim.notify("selection must be called in visual mode", vim.log.levels.INFO)
     return
   end
 
