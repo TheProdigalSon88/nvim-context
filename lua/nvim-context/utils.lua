@@ -15,7 +15,6 @@ end
 function private.write_context(context_path, context)
   local lines = {}
   table.insert(lines, "return {")
-  table.insert(lines, string.format("  type = %q,", context.type or "context"))
   table.insert(lines, string.format("  description = %q,", context.description or ""))
   table.insert(lines, "  files = {")
 
@@ -32,7 +31,13 @@ function private.write_context(context_path, context)
       end
       table.insert(
         lines,
-        string.format("      { lnum = %d, end_lnum = %d, git_object = %s },", range.lnum, range.end_lnum, git_str)
+        string.format(
+          "      { lnum = %d, end_lnum = %d, git_object = %s , description = %s },",
+          range.lnum,
+          range.end_lnum,
+          git_str,
+          range.description
+        )
       )
     end
     table.insert(lines, "    },")
@@ -92,9 +97,10 @@ end
 ---@param filepath string
 ---@param lnum integer
 ---@param end_lnum integer
+---@param description string
 ---@param git_object? table
 ---@return boolean
-function Utils.add_to_context(context_name, filepath, lnum, end_lnum, git_object)
+function Utils.add_to_context(context_name, filepath, lnum, end_lnum, description, git_object)
   vim.notify("context_name " .. context_name, vim.log.levels.INFO)
   if vim.fn.filereadable(context_name) ~= 1 then
     vim.notify("Context file not found: " .. context_name, vim.log.levels.ERROR)
@@ -112,6 +118,9 @@ function Utils.add_to_context(context_name, filepath, lnum, end_lnum, git_object
       if existing.lnum == lnum and existing.end_lnum == end_lnum then
         vim.notify("Range already in context: " .. filepath .. ":" .. lnum .. "-" .. end_lnum, vim.log.levels.WARN)
         return true
+      elseif lnum and end_lnum then
+        vim.notify("File already in context: " .. filepath, vim.log.levels.WARN)
+        return true
       end
     end
   else
@@ -122,6 +131,7 @@ function Utils.add_to_context(context_name, filepath, lnum, end_lnum, git_object
     lnum = lnum,
     end_lnum = end_lnum,
     git_object = git_object or {},
+    description = description or nil,
   })
 
   local write_ok = private.write_context(context_name, context)
@@ -261,6 +271,46 @@ function Utils.context_to_quickfix(context_name)
 
   local title = vim.fn.fnamemodify(context_name, ":t:r")
   vim.fn.setqflist({}, " ", { title = title, items = items })
+end
+
+---@param filepath string absolute path of the file to filter locations for
+---@param active_context string path to the active .context/*.lua file
+function Utils.file_locations_to_loclist(filepath, active_context)
+  if vim.fn.filereadable(active_context) ~= 1 then
+    vim.notify("Context file not found: " .. active_context, vim.log.levels.ERROR)
+    return
+  end
+
+  local ok, context = pcall(dofile, active_context)
+  if not ok or type(context) ~= "table" or type(context.files) ~= "table" then
+    vim.notify("Invalid context file: " .. active_context, vim.log.levels.ERROR)
+    return
+  end
+
+  local abs_filepath = vim.fn.fnamemodify(filepath, ":p")
+  local ranges = context.files[abs_filepath]
+  if not ranges or #ranges == 0 then
+    vim.notify("No locations for " .. abs_filepath .. " in context", vim.log.levels.WARN)
+    return
+  end
+
+  local items = {}
+  for _, range in ipairs(ranges) do
+    table.insert(items, {
+      filename = abs_filepath,
+      lnum = range.lnum,
+      end_lnum = range.end_lnum,
+      text = range.description,
+    })
+  end
+
+  table.sort(items, function(a, b)
+    return a.lnum < b.lnum
+  end)
+
+  local title = vim.fn.fnamemodify(active_context, ":t:r") .. ": " .. vim.fn.fnamemodify(abs_filepath, ":t")
+  local winid = vim.api.nvim_get_current_win()
+  vim.fn.setloclist(winid, {}, " ", { title = title, items = items })
 end
 
 return Utils
