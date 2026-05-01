@@ -32,49 +32,49 @@ function Context.create_context()
   end)
 end
 
+function Context.add_selection_to_qf()
+  local selection = File.selection()
+  if selection then
+    local filepath = selection and vim.fn.fnamemodify(selection.text:match("^(.+):%d"), ":p") or nil
+    if filepath then
+      local git_object = Utils.get_newest_commit_in_range(filepath, selection.lnum, selection.end_lnum)
+      if git_object then
+        Utils.add_to_context(Context.active_context, filepath, selection.lnum, selection.end_lnum, git_object)
+      else
+        Utils.add_to_context(Context.active_context, filepath, selection.lnum, selection.end_lnum)
+      end
+      vim.notify("Add " .. filepath .. " to Context " .. Context.active_context, vim.log.levels.INFO)
+      File.highlight(selection)
+      vim.fn.setqflist({ selection }, "a")
+      return
+    else
+      vim.notify("No valid filepath", vim.log.levels.ERROR)
+    end
+  end
+  vim.notify("Selction is nil", vim.log.levels.WARN)
+end
+
 function Context.add_file_to_context()
   if Context.active_context == nil then
     vim.notify("No Context Active", vim.log.levels.WARN)
     return
   end
 
-  local bufpath = vim.api.nvim_buf_get_name(0)
-  if bufpath == "" then
-    vim.notify("Current buffer has no file path", vim.log.levels.WARN)
+  local filepath = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":p")
+  if filepath == "" then
+    vim.notify("No file associated with current buffer", vim.log.levels.WARN)
     return
   end
 
-  local filepath = vim.fn.fnamemodify(bufpath, ":p")
-
-  Utils.add_file_to_context(Context.active_context, filepath)
-  vim.notify("Add " .. filepath .. " to Context " .. Context.active_context, vim.log.levels.INFO)
-end
-
-function Context.add_selection_to_qf()
-  local selection = File.selection()
-  if selection then
-    local filepath = selection and vim.fn.fnamemodify(selection.text:match("^(.+):%d"), ":p") or nil
-    local git_object = Utils.get_newest_commit_in_range(filepath, selection.lnum, selection.end_lnum)
-    if git_object then
-      Utils.add_to_context(Context.active_context, filepath, selection.lnum, selection.end_lnum, git_object)
-    else
-      Utils.add_to_context(Context.active_context, filepath, selection.lnum, selection.end_lnum)
-    end
-    vim.notify("Add " .. filepath .. " to Context " .. Context.active_context, vim.log.levels.INFO)
-    File.highlight(selection)
-    vim.fn.setqflist({ selection }, "a")
-    return
+  local line_count = vim.api.nvim_buf_line_count(0)
+  local git_object = Utils.get_newest_commit_in_range(filepath, 1, line_count)
+  if git_object then
+    Utils.add_to_context(Context.active_context, filepath, 1, line_count, git_object)
+  else
+    Utils.add_to_context(Context.active_context, filepath, 1, line_count)
   end
-  vim.notify("Selction is nil", vim.log.levels.WARN)
+  vim.notify("Added " .. filepath .. " to Context " .. Context.active_context, vim.log.levels.INFO)
 end
-
-vim.keymap.set("v", "<leader>aa", function()
-  Context.add_selection_to_qf()
-end, { desc = "Add selection to qf" })
-
-vim.keymap.set("n", "<leader>a", function()
-  Context.add_selection_to_qf()
-end, { desc = "Add line to qf" })
 
 function Context.toggle_files()
   if Context.active_context == nil then
