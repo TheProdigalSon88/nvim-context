@@ -19,6 +19,36 @@ local function close_keymaps(win, buf)
   end, { buffer = buf, desc = "Close" })
 end
 
+-- function Window.open_floating_description(title, on_submit)
+--   local buf, height, width = winutils.create_creation_buffer()
+--   local win = winutils.create_win(buf, height, width, title)
+--   local TAG_LINE, LABEL_LINE
+--   DESC_START, DESC_END = winutils.description_labels(buf)
+--   winutils.cursor_locking_creation(buf, win, NAME_LINE, DESC_START, DESC_END)
+--
+--   -- Start on the name field
+--   vim.api.nvim_win_set_cursor(win, { NAME_LINE + 1, 0 })
+--
+--   -- ── Autocmds ─────────────────────────────────────────────────────────
+--   vim.api.nvim_create_autocmd({ "BufLeave", "WinLeave" }, {
+--     buffer = buf,
+--     callback = function()
+--       close(win)
+--     end,
+--   })
+--
+--   vim.api.nvim_create_autocmd("VimResized", {
+--     buffer = buf,
+--     callback = function()
+--       winutils.resizing(win, 52, height, vim.o.columns)
+--     end,
+--   })
+--
+--   winutils.creation_keymaps(buf, win, NAME_LINE, DESC_START, DESC_END, on_submit)
+--
+--   close_keymaps(win, buf)
+-- end
+--
 function Window.open_floating_creation(title, on_submit)
   local buf, height, width = winutils.create_creation_buffer()
   local win = winutils.create_win(buf, height, width, title)

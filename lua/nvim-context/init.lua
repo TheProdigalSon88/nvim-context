@@ -19,6 +19,7 @@ function Context.toggle()
     Context.create_context()
   else
     Window.open_floating_selection_contexts("Contexts", contexts, function(filepath)
+      Utils.invalidate_cache()
       Context.active_context = filepath
       Utils.context_to_quickfix(Context.active_context)
       vim.notify("Active Context :" .. Context.active_context, vim.log.levels.INFO)
@@ -27,21 +28,28 @@ function Context.toggle()
 end
 
 function Context.create_context()
+  if Context.context_dir == nil then
+    Context.check_and_create()
+  end
   Window.open_floating_creation("Create Context", function(name, description)
     Context.active_context = Utils.create_context(Context.context_dir, name, description)
   end)
 end
 
-function Context.add_selection_to_qf()
+function Context.add_selection()
+  if Context.context_dir == nil then
+    Context.check_and_create()
+    Context.create_context()
+  end
   local selection = File.selection()
   if selection then
     local filepath = selection and vim.fn.fnamemodify(selection.text:match("^(.+):%d"), ":p") or nil
     if filepath then
       local git_object = Utils.get_newest_commit_in_range(filepath, selection.lnum, selection.end_lnum)
       if git_object then
-        Utils.add_to_context(Context.active_context, filepath, selection.lnum, selection.end_lnum, git_object)
+        Utils.add_to_context(Context.active_context, filepath, selection.lnum, selection.end_lnum, "", git_object)
       else
-        Utils.add_to_context(Context.active_context, filepath, selection.lnum, selection.end_lnum)
+        Utils.add_to_context(Context.active_context, filepath, selection.lnum, selection.end_lnum, "")
       end
       vim.notify("Add " .. filepath .. " to Context " .. Context.active_context, vim.log.levels.INFO)
       File.highlight(selection)
@@ -52,28 +60,6 @@ function Context.add_selection_to_qf()
     end
   end
   vim.notify("Selction is nil", vim.log.levels.WARN)
-end
-
-function Context.add_file_to_context()
-  if Context.active_context == nil then
-    vim.notify("No Context Active", vim.log.levels.WARN)
-    return
-  end
-
-  local filepath = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":p")
-  if filepath == "" then
-    vim.notify("No file associated with current buffer", vim.log.levels.WARN)
-    return
-  end
-
-  local line_count = vim.api.nvim_buf_line_count(0)
-  local git_object = Utils.get_newest_commit_in_range(filepath, 1, line_count)
-  if git_object then
-    Utils.add_to_context(Context.active_context, filepath, 1, line_count, git_object)
-  else
-    Utils.add_to_context(Context.active_context, filepath, 1, line_count)
-  end
-  vim.notify("Added " .. filepath .. " to Context " .. Context.active_context, vim.log.levels.INFO)
 end
 
 function Context.toggle_files()

@@ -11,8 +11,11 @@ File.selection = function()
 
     start_line = vim.fn.getpos("'<")[2]
     end_line = vim.fn.getpos("'>")[2]
+  elseif mode == "n" then
+    start_line = 1
+    end_line = vim.api.nvim_buf_line_count(0)
   else
-    vim.notify("selection must be called in visual mode", vim.log.levels.INFO)
+    vim.notify("selection must be called in normal or visual mode", vim.log.levels.INFO)
     return
   end
 

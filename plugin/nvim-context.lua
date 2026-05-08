@@ -1,10 +1,11 @@
 Context = require("nvim-context")
+local utils = require("nvim-context.utils")
 
 vim.api.nvim_create_augroup("Context", { clear = true })
 
 local _in_context_autocmd = false
 
-vim.api.nvim_create_autocmd("BufEnter", {
+vim.api.nvim_create_autocmd("BufWinEnter", {
   group = "Context",
   pattern = "*",
   callback = function(args)
@@ -12,24 +13,26 @@ vim.api.nvim_create_autocmd("BufEnter", {
       return
     end
     _in_context_autocmd = true
+    local ok, err = pcall(function()
+      local bufnr = args.buf
+      local buftype = vim.bo[bufnr].buftype
+      if buftype ~= "" then
+        return
+      end
 
-    local bufnr = args.buf
-    local buftype = vim.bo[bufnr].buftype
-    if buftype ~= "" then
-      _in_context_autocmd = false
-      return
-    end
-    local filepath = vim.api.nvim_buf_get_name(bufnr)
-    if filepath == "" then
-      _in_context_autocmd = false
-      return
-    end
-    filepath = vim.fn.fnamemodify(filepath, ":p")
-    if Context.active_context then
-      require("nvim-context.utils").file_locations_to_loclist(filepath, Context.active_context)
-    end
-
+      local filepath = vim.api.nvim_buf_get_name(bufnr)
+      if filepath == "" then
+        return
+      end
+      filepath = vim.fn.fnamemodify(filepath, ":p")
+      if Context.active_context then
+        utils.file_locations_to_loclist(filepath, Context.active_context)
+      end
+    end)
     _in_context_autocmd = false
+    if not ok then
+      error(err)
+    end
   end,
 })
 

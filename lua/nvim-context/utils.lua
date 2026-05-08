@@ -1,6 +1,21 @@
 local Utils = {}
 local private = {}
 
+private.cache = {}
+
+function private.get_cache_key(filepath, active_context)
+  local mtime = vim.fn.getftime(active_context)
+  return filepath .. "::" .. active_context .. "::" .. tostring(mtime)
+end
+
+function private.invalidate()
+  private.cache = {}
+end
+
+function Utils.invalidate_cache()
+  private.invalidate()
+end
+
 ---@return string
 function private.get_context_root()
   local path = vim.api.nvim_buf_get_name(0)
@@ -139,6 +154,8 @@ function Utils.add_to_context(context_name, filepath, lnum, end_lnum, descriptio
     return false
   end
 
+  private.invalidate()
+
   vim.notify("Added " .. filepath .. " to context", vim.log.levels.INFO)
   return true
 end
@@ -163,6 +180,7 @@ function Utils.create_context(context_dir, name, description)
   end
 
   vim.notify("Created context: " .. new_file, vim.log.levels.INFO)
+  private.invalidate()
   return new_file
 end
 
@@ -281,15 +299,29 @@ function Utils.file_locations_to_loclist(filepath, active_context)
     return
   end
 
+  local abs_filepath = vim.fn.fnamemodify(filepath, ":p")
+  local cache_key = private.get_cache_key(abs_filepath, active_context)
+  local cached = private.cache[cache_key]
+
+  if cached then
+    if cached.items == nil then
+      vim.notify("No locations for " .. abs_filepath .. " in context", vim.log.levels.WARN)
+      return
+    end
+    local winid = vim.api.nvim_get_current_win()
+    vim.fn.setloclist(winid, {}, " ", { title = cached.title, items = cached.items })
+    return
+  end
+
   local ok, context = pcall(dofile, active_context)
   if not ok or type(context) ~= "table" or type(context.files) ~= "table" then
     vim.notify("Invalid context file: " .. active_context, vim.log.levels.ERROR)
     return
   end
 
-  local abs_filepath = vim.fn.fnamemodify(filepath, ":p")
   local ranges = context.files[abs_filepath]
   if not ranges or #ranges == 0 then
+    private.cache[cache_key] = { items = nil, title = nil }
     vim.notify("No locations for " .. abs_filepath .. " in context", vim.log.levels.WARN)
     return
   end
@@ -309,6 +341,8 @@ function Utils.file_locations_to_loclist(filepath, active_context)
   end)
 
   local title = vim.fn.fnamemodify(active_context, ":t:r") .. ": " .. vim.fn.fnamemodify(abs_filepath, ":t")
+  private.cache[cache_key] = { items = items, title = title }
+
   local winid = vim.api.nvim_get_current_win()
   vim.fn.setloclist(winid, {}, " ", { title = title, items = items })
 end

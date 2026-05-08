@@ -25,6 +25,61 @@ local function refresh_placeholder(buf, ns, line, text, mark_id_key, state)
   end
 end
 
+------@param buf number
+---function WinUtils.description_labels(buf)
+---  local ns = vim.api.nvim_create_namespace("nvim_context_description")
+---  vim.api.nvim_buf_set_extmark(buf, ns, 0, 0, {
+---    virt_text = { { "  Tags", "NvimContextLabel" } },
+---    virt_text_pos = "overlay",
+---  })
+---
+---  vim.api.nvim_buf_set_extmark(buf, ns, 3, 0, {
+---    virt_text = { { "  Labels", "NvimContextLabel" } },
+---    virt_text_pos = "overlay",
+---  })
+---  vim.api.nvim_buf_set_extmark(buf, ns, 6, 0, {
+---    virt_text = { { "  Description", "NvimContextLabel" } },
+---    virt_text_pos = "overlay",
+---  })
+---  vim.api.nvim_buf_set_extmark(buf, ns, 2, 0, { line_hl_group = "NvimContextSep" })
+---  vim.api.nvim_buf_set_extmark(buf, ns, 5, 0, { line_hl_group = "NvimContextSep" })
+---  vim.api.nvim_buf_set_extmark(buf, ns, 10, 0, { line_hl_group = "NvimContextSep" })
+---
+---  -- Hint bar
+---  vim.api.nvim_buf_set_extmark(buf, ns, 11, 0, {
+---    virt_text = {
+---      { "  <Tab> ", "NvimContextHintKey" },
+---      { "Next field", "NvimContextHintText" },
+---      { "  ", "Normal" },
+---      { "<CR> ", "NvimContextHintKey" },
+---      { "Submit", "NvimContextHintText" },
+---      { "  ", "Normal" },
+---      { "q / <Esc> ", "NvimContextHintKey" },
+---      { "Cancel", "NvimContextHintText" },
+---    },
+---    virt_text_pos = "overlay",
+---  })
+---
+---  local ph = {} -- mutable state for placeholder extmark ids
+---  local TAG_LINE = 1
+---  local LABEL_LINE = 4
+---  local DESC_START = 7
+---  local DESC_END = 9
+---
+---  local function update_placeholders()
+---    refresh_placeholder(buf, ns, TAG_LINE, "  letters, _ or - only", "tags", ph)
+---    refresh_placeholder(buf, ns, LABEL_LINE, "  letters, _ or - only", "labels", ph)
+---    refresh_placeholder(buf, ns, DESC_START, "  What is this context about?", "desc", ph)
+---  end
+---  update_placeholders()
+---
+---  vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
+---    buffer = buf,
+---    callback = update_placeholders,
+---  })
+---  return TAG_LINE, LABEL_LINE, DESC_START, DESC_END
+---end
+---
 ---@param buf number
 function WinUtils.creation_labels(buf)
   local ns = vim.api.nvim_create_namespace("nvim_context_creation")
