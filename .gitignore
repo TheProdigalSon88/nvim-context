@@ -1,0 +1,7 @@
+.luacheckrc
+.stylua.toml
+.github/
+.git/
+.nvim-context/
+example
+LICENSE
