@@ -44,7 +44,7 @@ function Context.AddReference()
       diagram_enabled = Context.Options.diagram.enabled,
       diagram_snippets = Context.Options.diagram.enabled and Context.Options.diagram.snippets or nil,
    }
-   buffer.open_note_editor(referenceBuffer, function(description)
+   buffer.open_reference_editor(referenceBuffer, function(description)
       ---@type vim.quickfix.entry
       local item = {
          filename = utils.get_file_path(bufnr, Context.root),
@@ -100,7 +100,7 @@ function Context.EditReference(idx)
       diagram_snippets = Context.Options.diagram.enabled and Context.Options.diagram.snippets or nil,
    }
 
-   buffer.open_note_editor(referenceBuffer, function(description)
+   buffer.open_reference_editor(referenceBuffer, function(description)
       if description == nil then
          return
       end
@@ -208,7 +208,7 @@ function Context.AddEditContextDescription()
       diagram_snippets = Context.Options.diagram.enabled and Context.Options.diagram.snippets or nil,
    }
 
-   buffer.open_note_editor(referenceBuffer, function(description)
+   buffer.open_reference_editor(referenceBuffer, function(description)
       if description == nil then
          return
       end
@@ -315,9 +315,6 @@ function Context.ShowReference(line1, line2)
       log.info("no context references found at cursor")
       return
    end
-   table.sort(items, function(a, b)
-      return (a.timestamp or "") > (b.timestamp or "")
-   end)
 
    buffer.open_references_viewer(items, bufnr, function(item)
       local load_ok, data = pcall(sql.load_list, Context.root, item.list_id)
@@ -331,7 +328,7 @@ function Context.ShowReference(line1, line2)
          context = { description = data.description, id = data.id },
       })
       log.info("loaded context: " .. data.title)
-      buffer.open_note_editor({
+      buffer.open_reference_editor({
          default = item.description,
          code = item.base_text,
          source_buf = bufnr,

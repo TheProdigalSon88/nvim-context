@@ -23,7 +23,7 @@
 ---@field base_text? string
 ---@field display_text? string
 ---@field git_hash? string
----@field timestamp string|osdate
+---@field timestamp string
 
 ---@class UpdateContextItem
 ---@field id? number

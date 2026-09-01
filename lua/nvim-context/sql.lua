@@ -207,7 +207,7 @@ end
 
 ---@param root string
 ---@param id number
----@return Context|nil
+---@return ContextList|nil
 function M.load_list(root, id)
    if not id then
       return nil

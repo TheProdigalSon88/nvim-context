@@ -62,7 +62,7 @@ end
 
 ---@param opts ReferenceBuffer
 ---@param callback function
-function Buffer.open_note_editor(opts, callback)
+function Buffer.open_reference_editor(opts, callback)
    local lines = {}
    for line in ((opts.default or "") .. "\n"):gmatch("(.-)\n") do
       table.insert(lines, line)
@@ -181,6 +181,9 @@ end
 ---@param source_buf? number   source buffer (used for filetype detection)
 ---@param on_select? fun(item: ContextItem)  called when <CR> is pressed anywhere in a section
 function Buffer.open_references_viewer(items, source_buf, on_select, opts)
+   table.sort(items, function(a, b)
+      return (a.timestamp or "") > (b.timestamp or "")
+   end)
    local source_loaded = source_buf and vim.api.nvim_buf_is_loaded(source_buf)
    local lang = source_loaded and vim.bo[source_buf].filetype or ""
 
