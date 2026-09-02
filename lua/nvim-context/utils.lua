@@ -1,8 +1,8 @@
 local Utils = {}
 
 ---@param context vim.fn.setqflist.what
----@param previous_context Context|nil
----@return boolean,Context
+---@param previous_context ContextList|nil
+---@return boolean,ContextList
 function Utils.qflist_to_context(context, previous_context)
    local ctx = type(context.context) == "table" and context.context or {}
    local result = {}

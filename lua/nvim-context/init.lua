@@ -249,7 +249,7 @@ function Context.SaveContext()
       end
    end
 
-   ---@type boolean,boolean,Context
+   ---@type boolean,boolean,ContextList
    local conv_ok, new, context = pcall(utils.qflist_to_context, info, previous_context)
    if not conv_ok then
       log.error("failed to build context: " .. tostring(context))
