@@ -203,4 +203,29 @@ function Utils.find_qf_index(qflist, item)
    return nil
 end
 
+---@param items vim.quickfix.entry[]
+---@param previous_items ContextItem[]|nil
+---@return number[]
+function Utils.deleted_item_ids(items, previous_items)
+   if not previous_items or #previous_items == 0 then
+      return {}
+   end
+
+   local current_ids = {}
+   for _, item in ipairs(items or {}) do
+      local id = type(item.user_data) == "table" and item.user_data.id
+      if id then
+         current_ids[id] = true
+      end
+   end
+
+   local deleted = {}
+   for _, prev in ipairs(previous_items) do
+      if prev.id and not current_ids[prev.id] then
+         table.insert(deleted, prev.id)
+      end
+   end
+   return deleted
+end
+
 return Utils

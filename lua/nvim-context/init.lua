@@ -259,6 +259,7 @@ function Context.SaveContext()
    ---@type ContextItem, UpdateContextItem
    local new_items, updated_items =
       utils.qfitems_to_dbrows(info.items, previous_context and previous_context.items, Context.root)
+   local deleted_ids = utils.deleted_item_ids(info.items, previous_context and previous_context.items)
 
    if new then
       local ok, new_id = pcall(sql.insert_context, Context.root, context, new_items)
@@ -277,7 +278,8 @@ function Context.SaveContext()
          context,
          new_items,
          updated_items,
-         previous_context and previous_context.title
+         previous_context and previous_context.title,
+         deleted_ids
       )
       if not ok then
          log.error("failed to update context: " .. tostring(err))
@@ -416,6 +418,50 @@ function Context.EditTroubleItemNote(_, ctx)
    else
       log.info("trouble not enabled")
    end
+end
+
+---@param idx number
+local function delete_qf_index(idx)
+   local qflist = vim.fn.getqflist()
+   if not idx or not qflist[idx] then
+      log.error("no context reference under cursor")
+      return
+   end
+   table.remove(qflist, idx)
+   vim.fn.setqflist({}, "r", { items = qflist })
+   if Context.Options and Context.Options.trouble then
+      require("trouble").refresh("qflist")
+   end
+   log.info("deleted context reference")
+end
+
+---@param line1? number
+function Context.DeleteReference(line1)
+   if vim.bo.filetype ~= "qf" then
+      log.error("DeleteReference must be run from the quickfix list")
+      return
+   end
+   delete_qf_index(line1 or vim.fn.line("."))
+end
+
+function Context.DeleteTroubleItem(_, ctx)
+   if not (Context.Options and Context.Options.trouble) then
+      log.info("trouble not enabled")
+      return
+   end
+
+   local raw_item = ctx and ctx.item and ctx.item.item
+   if not raw_item then
+      log.error("no quickfix reference under cursor")
+      return
+   end
+
+   local idx = utils.find_qf_index(vim.fn.getqflist(), raw_item)
+   if not idx then
+      log.error("could not locate context reference")
+      return
+   end
+   delete_qf_index(idx)
 end
 
 return Context

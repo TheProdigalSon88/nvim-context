@@ -171,11 +171,29 @@ function M.insert_context(root, data, items)
 end
 
 ---@param root string
+---@param ids number[]
+function M.delete_items(root, ids)
+   if not ids or #ids == 0 then
+      return
+   end
+
+   local d = get_db(root)
+   if not d then
+      error("nvim-context: database unavailable")
+   end
+
+   for _, id in ipairs(ids) do
+      d.items:remove({ where = { id = id } })
+   end
+end
+
+---@param root string
 ---@param updated_context Context
 ---@param new_items ContextItem[]
 ---@param updated_items UpdateContextItem[]
 ---@param title string
-function M.update_context(root, updated_context, new_items, updated_items, title)
+---@param deleted_ids number[]|nil
+function M.update_context(root, updated_context, new_items, updated_items, title, deleted_ids)
    local d = get_db(root)
    if not d then
       error("nvim-context: database unavailable")
@@ -201,8 +219,10 @@ function M.update_context(root, updated_context, new_items, updated_items, title
 
    insert_items(root, list_id, new_items)
    update_items(root, updated_items)
+   M.delete_items(root, deleted_ids)
    Caching.invalidate("titles:" .. root)
    Caching.invalidate("Context:" .. root .. ":" .. title)
+   Caching.invalidate("Context:" .. root .. ":" .. list_id)
 end
 
 ---@param root string
