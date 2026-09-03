@@ -40,6 +40,18 @@
 ---@field git_hash string|nil
 ---@field timestamp string|osdate
 
+---@class ContextDiagramOptions
+---@field enabled? boolean
+---@field snippets? table<string, string> map of keymap string -> diagram type
+---@field image? table image.nvim setup opts (default `{ backend = "kitty" }`)
+---@field integrations? any[] diagram.nvim integrations; nil resolves to markdown at setup
+---@field renderer_options? table diagram.nvim renderer_options
+
+---@class ContextOptions
+---@field trouble? boolean
+---@field statusline? boolean
+---@field diagram? ContextDiagramOptions
+
 ---@class ReferenceBuffer
 ---@field default string
 ---@field code? string

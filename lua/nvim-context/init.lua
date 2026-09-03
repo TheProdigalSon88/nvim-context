@@ -4,12 +4,19 @@ local buffer = require("nvim-context.buffer")
 local log = require("nvim-context.log")
 
 local Context = {}
+---@type ContextOptions
 local defaults = {
    trouble = false,
    statusline = false,
    diagram = {
       enabled = false,
       snippets = {},
+      image = {
+         backend = "kitty",
+      },
+      renderer_options = {
+         mermaid = { theme = "default" },
+      },
    },
 }
 
@@ -21,8 +28,31 @@ vim.api.nvim_create_autocmd("FileType", {
    end,
 })
 
+local function setup_diagram_plugins()
+   local image_ok, image = pcall(require, "image")
+   if not image_ok then
+      log.error("diagram.enabled but image.nvim is not installed")
+      return
+   end
+   image.setup(Context.Options.diagram.image)
+
+   local diagram_ok, diagram = pcall(require, "diagram")
+   if not diagram_ok then
+      log.error("diagram.enabled but diagram.nvim is not installed")
+      return
+   end
+   local integrations = Context.Options.diagram.integrations or { require("diagram.integrations.markdown") }
+   diagram.setup({
+      integrations = integrations,
+      renderer_options = Context.Options.diagram.renderer_options,
+   })
+end
+
 function Context.setup(opts)
    Context.Options = vim.tbl_deep_extend("force", defaults, opts or {})
+   if Context.Options.diagram.enabled then
+      setup_diagram_plugins()
+   end
 end
 
 function Context.AddReference()
