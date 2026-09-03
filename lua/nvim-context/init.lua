@@ -411,48 +411,6 @@ function Context.ShowReference(line1, line2)
    })
 end
 
-function Context.OpenNoteViewer()
-   if not Context.root then
-      Context.root = vim.fs.root(0, ".git")
-      if not Context.root then
-         log.error("not inside a git repository")
-         return
-      end
-   end
-
-   if #vim.fn.getqflist() == 0 then
-      log.error("quickfix list is empty")
-      return
-   end
-
-   local function save_item(item, description)
-      if not item then
-         return
-      end
-      local qflist = vim.fn.getqflist()
-      local idx = utils.find_qf_index(qflist, item)
-      if not idx then
-         log.error("could not locate quickfix entry to update")
-         return
-      end
-      local ud = type(item.user_data) == "table" and vim.deepcopy(item.user_data) or {}
-      ud.description = description
-      qflist[idx].user_data = ud
-      vim.fn.setqflist({}, "r", { items = qflist })
-      if Context.Options and Context.Options.trouble then
-         require("trouble").refresh("qflist")
-      end
-      log.info("updated note")
-   end
-
-   local source_win = vim.api.nvim_get_current_win()
-   buffer.open_qf_note_viewer(save_item)
-
-   -- Restore focus to source window before jumping, so cc 1 lands there (not in the note pane).
-   vim.api.nvim_set_current_win(source_win)
-   vim.cmd("cc 1")
-end
-
 function Context.StatuslineComponent()
    return {
       function()
