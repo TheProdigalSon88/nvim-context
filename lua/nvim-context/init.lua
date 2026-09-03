@@ -321,6 +321,44 @@ function Context.SaveContext()
    end
 end
 
+function Context.ConvertQFlist()
+   if not Context.root then
+      Context.root = vim.fs.root(0, ".git")
+      if not Context.root then
+         log.error("not inside a git repository")
+         return
+      end
+   end
+
+   local info = vim.fn.getqflist({ items = 0, title = 0, context = 0 })
+   if not info.items or #info.items == 0 then
+      log.error("quickfix list is empty")
+      return
+   end
+
+   local converted, skipped = utils.qflist_to_context_items(info.items, Context.root)
+   if #converted == 0 then
+      log.error("no convertible quickfix entries")
+      return
+   end
+
+   vim.ui.input({ prompt = "Quickfix title: ", default = info.title or "" }, function(title)
+      if title == nil or title == "" then
+         log.error("context must have title")
+         return
+      end
+      vim.fn.setqflist({}, "r", { items = converted, title = title })
+      if Context.Options.trouble then
+         require("trouble").refresh("qflist")
+      end
+      local msg = "converted " .. #converted .. " quickfix entries"
+      if skipped > 0 then
+         msg = msg .. " (" .. skipped .. " skipped)"
+      end
+      log.info(msg)
+   end)
+end
+
 ---@param line1? number
 ---@param line2? number
 function Context.ShowReference(line1, line2)
