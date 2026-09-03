@@ -152,6 +152,199 @@ function Context.EditReference(idx)
    end)
 end
 
+---@type { idx: number, bufnr: number, orig_item: vim.quickfix.entry, committing: boolean, augroup: integer }|nil
+local range_edit
+
+---@param win number
+---@return boolean
+local function is_normal_file_win(win)
+   if not vim.api.nvim_win_is_valid(win) then
+      return false
+   end
+   if vim.w[win].trouble or vim.w[win].trouble_preview then
+      return false
+   end
+   local buf = vim.api.nvim_win_get_buf(win)
+   return vim.bo[buf].buftype == ""
+end
+
+---@param bufnr number
+---@return number|nil
+local function find_target_win(bufnr)
+   for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      if vim.api.nvim_win_get_buf(win) == bufnr and is_normal_file_win(win) then
+         return win
+      end
+   end
+   local prev = vim.fn.win_getid(vim.fn.winnr("#"))
+   if is_normal_file_win(prev) then
+      return prev
+   end
+   for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      if is_normal_file_win(win) then
+         return win
+      end
+   end
+   return nil
+end
+
+local function cleanup_range_edit()
+   local session = range_edit
+   range_edit = nil
+   if not session then
+      return
+   end
+   if session.augroup then
+      pcall(vim.api.nvim_del_augroup_by_id, session.augroup)
+   end
+   if session.bufnr and vim.api.nvim_buf_is_valid(session.bufnr) then
+      pcall(vim.keymap.del, "v", "<CR>", { buffer = session.bufnr })
+   end
+end
+
+local function commit_range_edit()
+   local session = range_edit
+   if not session then
+      return
+   end
+   session.committing = true
+
+   if not vim.fn.mode():match("^[vV\22]") then
+      cleanup_range_edit()
+      return
+   end
+
+   local start_line = vim.fn.line("v")
+   local end_line = vim.fn.line(".")
+   if end_line < start_line then
+      start_line, end_line = end_line, start_line
+   end
+
+   local lines = vim.api.nvim_buf_get_lines(session.bufnr, start_line - 1, end_line, false)
+   local display_text, base_text = utils.lines_to_display_and_base(lines)
+
+   local qflist = vim.fn.getqflist()
+   local fresh_idx = utils.find_qf_index(qflist, session.orig_item) or session.idx
+   local item = qflist[fresh_idx]
+   if not item then
+      cleanup_range_edit()
+      log.error("could not locate context reference")
+      return
+   end
+
+   item.lnum = start_line
+   item.end_lnum = end_line
+   item.text = display_text
+   local user_data = type(item.user_data) == "table" and item.user_data or {}
+   item.user_data = vim.tbl_extend("force", user_data, {
+      base_text = base_text,
+      display_text = display_text,
+      git_hash = utils.git_hash(),
+      timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+   })
+   qflist[fresh_idx] = item
+   vim.fn.setqflist({}, "r", { items = qflist })
+   if Context.Options and Context.Options.trouble then
+      require("trouble").refresh("qflist")
+   end
+   cleanup_range_edit()
+   vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "n", false)
+   log.info("updated context reference lines")
+end
+
+---@param idx number
+local function edit_reference_lines(idx)
+   local qflist = vim.fn.getqflist()
+   local item = qflist[idx]
+   if not item then
+      log.error("no context reference under cursor")
+      return
+   end
+
+   local bufnr = item.bufnr
+   if not (bufnr and bufnr > 0 and vim.api.nvim_buf_is_valid(bufnr)) then
+      local abs = utils.qf_abspath(item)
+      if not abs or abs == "" then
+         log.error("no file for context reference")
+         return
+      end
+      bufnr = vim.fn.bufadd(abs)
+   end
+   if not vim.api.nvim_buf_is_loaded(bufnr) then
+      vim.fn.bufload(bufnr)
+   end
+   if vim.bo[bufnr].buflisted == false then
+      vim.bo[bufnr].buflisted = true
+   end
+
+   local start_line, end_line = utils.qf_range(item)
+   local line_count = vim.api.nvim_buf_line_count(bufnr)
+   start_line = math.max(1, math.min(start_line, line_count))
+   end_line = math.max(1, math.min(end_line, line_count))
+   if end_line < start_line then
+      end_line = start_line
+   end
+
+   cleanup_range_edit()
+   local orig_item = vim.deepcopy(item)
+
+   vim.schedule(function()
+      local win = find_target_win(bufnr)
+      if not win then
+         vim.cmd("botright split")
+         win = vim.api.nvim_get_current_win()
+      end
+      vim.api.nvim_win_set_buf(win, bufnr)
+      vim.api.nvim_set_current_win(win)
+
+      vim.api.nvim_win_call(win, function()
+         vim.cmd(string.format("normal! %dGV%dG", end_line, start_line))
+      end)
+
+      range_edit = {
+         idx = idx,
+         bufnr = bufnr,
+         orig_item = orig_item,
+         committing = false,
+      }
+
+      vim.keymap.set("v", "<CR>", function()
+         commit_range_edit()
+      end, { buffer = bufnr, nowait = true, silent = true, desc = "Update context reference lines" })
+
+      local augroup = vim.api.nvim_create_augroup("NvimContextRangeEdit", { clear = true })
+      range_edit.augroup = augroup
+
+      vim.api.nvim_create_autocmd("ModeChanged", {
+         group = augroup,
+         buffer = bufnr,
+         pattern = "[vV\22]:n",
+         once = true,
+         callback = function()
+            if range_edit and not range_edit.committing then
+               cleanup_range_edit()
+            end
+         end,
+      })
+      vim.api.nvim_create_autocmd("BufWipeout", {
+         group = augroup,
+         buffer = bufnr,
+         callback = function()
+            cleanup_range_edit()
+         end,
+      })
+   end)
+end
+
+---@param idx? number
+function Context.EditReferenceLines(idx)
+   if vim.bo.filetype ~= "qf" then
+      log.error("EditReferenceLines must be run from the quickfix list")
+      return
+   end
+   edit_reference_lines(idx or vim.fn.line("."))
+end
+
 function Context.LoadContext()
    if not Context.root then
       Context.root = vim.fs.root(0, ".git")
@@ -444,6 +637,30 @@ function Context.EditTroubleItemNote(ctx)
    else
       log.info("trouble not enabled")
    end
+end
+
+function Context.EditTroubleItemLines(ctx)
+   if not (Context.Options and Context.Options.trouble) then
+      log.info("trouble not enabled")
+      return
+   end
+   if type(ctx) ~= "table" then
+      log.error("no quickfix reference under cursor")
+      return
+   end
+
+   local raw_item = ctx.item and ctx.item.item
+   if not raw_item then
+      log.error("no quickfix reference under cursor")
+      return
+   end
+
+   local idx = utils.find_qf_index(vim.fn.getqflist(), raw_item)
+   if not idx then
+      log.error("could not locate context reference")
+      return
+   end
+   edit_reference_lines(idx)
 end
 
 ---@param idx number

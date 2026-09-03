@@ -135,6 +135,18 @@ local function update_items(root, items)
     if item.description ~= nil then
       set.description = item.description
     end
+    if item.lnum ~= nil then
+      set.lnum = item.lnum
+    end
+    if item.end_lnum ~= nil then
+      set.end_lnum = item.end_lnum
+    end
+    if item.base_text ~= nil then
+      set.base_text = item.base_text
+    end
+    if item.display_text ~= nil then
+      set.display_text = item.display_text
+    end
     if item.git_hash ~= nil then
       set.git_hash = item.git_hash
     end

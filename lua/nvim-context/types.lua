@@ -29,6 +29,10 @@
 ---@field id? number
 ---@field title? string
 ---@field description? string
+---@field lnum? number
+---@field end_lnum? number
+---@field base_text? string
+---@field display_text? string
 ---@field git_hash? string
 ---@field timestamp string|osdate
 

@@ -59,19 +59,29 @@ function Utils.qfitems_to_dbrows(items, previous_items, root)
                timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
             })
          else
-            -- Existing item: compare labels and description against previous
+            -- Existing item: compare description and range against previous
             local prev = prev_by_id[user_data.id]
             if prev then
-               local description = user_data.description
-               local description_changed = description ~= prev.description
                local new_item = {
                   id = user_data.id,
                   git_hash = Utils.git_hash(),
                   timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
                }
 
-               if description_changed then
-                  new_item.description = description
+               if user_data.description ~= prev.description then
+                  new_item.description = user_data.description
+               end
+               if item.lnum ~= prev.lnum then
+                  new_item.lnum = item.lnum
+               end
+               if item.end_lnum ~= prev.end_lnum then
+                  new_item.end_lnum = item.end_lnum
+               end
+               if user_data.base_text ~= prev.base_text then
+                  new_item.base_text = user_data.base_text
+               end
+               if user_data.display_text ~= prev.display_text then
+                  new_item.display_text = user_data.display_text
                end
                table.insert(updated_items, new_item)
             end
