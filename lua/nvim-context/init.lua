@@ -400,7 +400,7 @@ function Context.StatuslineComponent()
    }
 end
 
-function Context.EditTroubleItemNote(_, ctx)
+function Context.EditTroubleItemNote(ctx)
    if Context.Options.trouble then
       local raw_item = ctx and ctx.item and ctx.item.item
       if not raw_item then
@@ -444,7 +444,7 @@ function Context.DeleteReference(line1)
    delete_qf_index(line1 or vim.fn.line("."))
 end
 
-function Context.DeleteTroubleItem(_, ctx)
+function Context.DeleteTroubleItem(ctx)
    if not (Context.Options and Context.Options.trouble) then
       log.info("trouble not enabled")
       return
