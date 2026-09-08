@@ -4,6 +4,10 @@ local buffer = require("nvim-context.buffer")
 local log = require("nvim-context.log")
 
 local Context = {}
+---@type LoadedContext[]
+Context.stack = {}
+---@type integer|nil
+Context.active_idx = nil
 ---@type ContextOptions
 local defaults = {
    trouble = false,
@@ -351,6 +355,97 @@ function Context.EditReferenceLines(idx)
    edit_reference_lines(idx or vim.fn.line("."))
 end
 
+---@return LoadedContext
+local function qf_snapshot()
+   local info = vim.fn.getqflist({ title = 0, items = 0, context = 0 })
+   return {
+      title = info.title or "",
+      items = info.items or {},
+      context = info.context,
+   }
+end
+
+local function snapshot_active()
+   if not Context.active_idx then
+      return
+   end
+   Context.stack[Context.active_idx] = qf_snapshot()
+end
+
+---@param entry LoadedContext
+---@param action string
+local function apply_loaded(entry, action)
+   vim.fn.setqflist({}, action, {
+      title = entry.title,
+      items = entry.items or {},
+      context = entry.context,
+   })
+   if Context.Options and Context.Options.trouble then
+      require("trouble").refresh("qflist")
+   end
+end
+
+---@param entry LoadedContext
+---@return number|string|nil
+local function context_id(entry)
+   if type(entry.context) ~= "table" then
+      return nil
+   end
+   local id = entry.context.id
+   if id == nil or id == "" then
+      return nil
+   end
+   return id
+end
+
+---@param id number|string|nil
+---@return integer|nil
+local function find_stack_idx_by_id(id)
+   if id == nil or id == "" then
+      return nil
+   end
+   for i, entry in ipairs(Context.stack) do
+      if context_id(entry) == id then
+         return i
+      end
+   end
+end
+
+---@param idx integer
+local function move_to_top(idx)
+   if idx == 1 then
+      return
+   end
+   local entry = table.remove(Context.stack, idx)
+   table.insert(Context.stack, 1, entry)
+end
+
+---@param idx integer
+---@param action string
+local function activate_idx(idx, action)
+   if idx == 1 and Context.active_idx == 1 then
+      return
+   end
+   snapshot_active()
+   move_to_top(idx)
+   Context.active_idx = 1
+   apply_loaded(Context.stack[1], action)
+end
+
+---@param entry LoadedContext
+---@param action string
+local function push_loaded(entry, action)
+   snapshot_active()
+   table.insert(Context.stack, 1, entry)
+   Context.active_idx = 1
+   apply_loaded(entry, action)
+end
+
+local function adopt_current_qf()
+   table.insert(Context.stack, 1, qf_snapshot())
+   Context.active_idx = 1
+end
+
 function Context.LoadContext()
    if not Context.root then
       Context.root = vim.fs.root(0, ".git")
@@ -388,9 +483,16 @@ function Context.LoadContext()
                log.error("context must have title")
                return
             end
-            vim.fn.setqflist({}, " ", { title = title, items = {} })
+            push_loaded({ title = title, items = {}, context = {} }, " ")
             log.info("created context " .. title)
          end)
+         return
+      end
+
+      local stacked_idx = find_stack_idx_by_id(choice.id)
+      if stacked_idx then
+         activate_idx(stacked_idx, "r")
+         log.info("loaded context: " .. choice.title)
          return
       end
 
@@ -399,14 +501,52 @@ function Context.LoadContext()
          log.error("failed to load context" .. tostring(data))
          return
       end
-      ---@type vim.fn.setqflist.what
+      ---@type LoadedContext
       local selectedContext = {
          title = data.title ~= "" and data.title or choice.title,
          items = utils.dbrows_to_qfitems(data.items, Context.root),
          context = { description = data.description, id = data.id },
       }
-      vim.fn.setqflist({}, " ", selectedContext)
+      push_loaded(selectedContext, " ")
       log.info("loaded context: " .. choice.title)
+   end)
+end
+
+function Context.PickContext()
+   if not Context.stack or #Context.stack == 0 then
+      log.info("no loaded contexts")
+      return
+   end
+
+   vim.ui.select(Context.stack, {
+      prompt = "Switch context:",
+      format_item = function(item)
+         local idx
+         for i, entry in ipairs(Context.stack) do
+            if entry == item then
+               idx = i
+               break
+            end
+         end
+         local prefix = idx == Context.active_idx and "* " or "  "
+         return prefix .. (item.title or "")
+      end,
+   }, function(choice)
+      if not choice then
+         return
+      end
+      local idx
+      for i, entry in ipairs(Context.stack) do
+         if entry == choice then
+            idx = i
+            break
+         end
+      end
+      if not idx then
+         return
+      end
+      activate_idx(idx, "r")
+      log.info("switched to context: " .. choice.title)
    end)
 end
 
@@ -550,6 +690,9 @@ function Context.ConvertQFlist()
       if Context.Options.trouble then
          require("trouble").refresh("qflist")
       end
+      if not Context.active_idx then
+         adopt_current_qf()
+      end
       local msg = "converted " .. #converted .. " quickfix entries"
       if skipped > 0 then
          msg = msg .. " (" .. skipped .. " skipped)"
@@ -591,6 +734,8 @@ function Context.ShowReference(line1, line2)
          log.error("failed to load context: " .. tostring(data))
          return
       end
+      snapshot_active()
+      Context.active_idx = nil
       vim.fn.setqflist({}, " ", {
          title = data.title,
          items = utils.dbrows_to_qfitems(data.items, Context.root),

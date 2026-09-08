@@ -2,6 +2,11 @@
 ---@field id string
 ---@field title string
 
+---@class LoadedContext
+---@field title string
+---@field items vim.quickfix.entry[]
+---@field context table|nil
+
 ---@class ContextList
 ---@field id? number
 ---@field title? string
