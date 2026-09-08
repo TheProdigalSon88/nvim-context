@@ -50,6 +50,7 @@ end
 
 function Context.setup(opts)
    Context.Options = vim.tbl_deep_extend("force", defaults, opts or {})
+   require("nvim-context.diff").setup()
    if Context.Options.diagram.enabled then
       setup_diagram_plugins()
    end
@@ -606,6 +607,7 @@ function Context.ShowReference(line1, line2)
       }, function() end)
    end, {
       diagram_enabled = Context.Options.diagram.enabled,
+      git_root = Context.root,
    })
 end
 

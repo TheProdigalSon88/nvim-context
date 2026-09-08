@@ -49,6 +49,9 @@
 ---@field new string[]
 ---@field hunks integer[][]
 
+---@class RangeDiffOpts
+---@field source_buf? number
+
 ---@class ContextDiagramOptions
 ---@field enabled? boolean
 ---@field snippets? table<string, string> map of keymap string -> diagram type

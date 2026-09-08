@@ -1,4 +1,5 @@
 local utils = require("nvim-context.utils")
+local Diff = require("nvim-context.diff")
 local log = require("nvim-context.log")
 
 local M = {}
@@ -22,75 +23,6 @@ local function git_root_for_item(item)
       return vim.fs.root(abs, ".git")
    end
    return vim.fs.root(0, ".git")
-end
-
-local function setup_highlight()
-   local link = "DiffDelete"
-   if vim.fn.hlexists("MiniDiffOverDelete") == 1 then
-      link = "MiniDiffOverDelete"
-   end
-   vim.api.nvim_set_hl(0, "NvimContextChanged", {
-      link = link,
-   })
-end
-
----@param buf number
----@param start_line number
----@param diff RangeDiff
-local function apply_diff_marks(buf, start_line, diff)
-   local Render = require("trouble.view.render")
-   local mark_ns = Render.ns
-   local line_count = vim.api.nvim_buf_line_count(buf)
-
-   ---@param row number
-   ---@return number
-   local function clamp_row(row)
-      return math.max(1, math.min(row, line_count))
-   end
-
-   for _, hunk in ipairs(diff.hunks) do
-      local old_start, old_count, new_start, new_count = hunk[1], hunk[2], hunk[3], hunk[4]
-
-      if new_count > 0 and new_start > 0 then
-         local row = clamp_row(start_line + new_start - 1)
-         local end_row = clamp_row(start_line + new_start + new_count - 2)
-         local hl = old_count == 0 and "DiffAdd" or "DiffChange"
-         for l = row, end_row do
-            vim.api.nvim_buf_set_extmark(buf, mark_ns, l - 1, 0, {
-               line_hl_group = hl,
-               hl_eol = true,
-               strict = false,
-               priority = 160,
-            })
-         end
-      end
-
-      if old_count > 0 then
-         local virt = {}
-         for i = 0, old_count - 1 do
-            virt[#virt + 1] = { { diff.old[old_start + i] or "", "DiffDelete" } }
-         end
-         local place_row
-         local above
-         if new_count == 0 and new_start <= 0 then
-            place_row = start_line
-            above = true
-         elseif new_count == 0 then
-            place_row = start_line + new_start - 1
-            above = false
-         else
-            place_row = start_line + math.max(new_start, 1) - 1
-            above = true
-         end
-         place_row = clamp_row(place_row)
-         vim.api.nvim_buf_set_extmark(buf, mark_ns, place_row - 1, 0, {
-            virt_lines = virt,
-            virt_lines_above = above,
-            strict = false,
-            priority = 160,
-         })
-      end
-   end
 end
 
 ---@param buf number
@@ -151,7 +83,7 @@ local function preview_context_item(item, ctx)
    local Render = require("trouble.view.render")
    Render.reset(ctx.buf)
    local start_line = utils.qf_range(raw)
-   apply_diff_marks(ctx.buf, start_line, diff)
+   Diff.apply_range_marks(ctx.buf, Render.ns, start_line, diff)
 end
 
 function M.setup()
@@ -161,14 +93,10 @@ function M.setup()
       return
    end
 
-   setup_highlight()
+   Diff.setup_highlight()
    qf.preview = preview_context_item
 
    local group = vim.api.nvim_create_augroup("NvimContextTrouble", { clear = true })
-   vim.api.nvim_create_autocmd("ColorScheme", {
-      group = group,
-      callback = setup_highlight,
-   })
    vim.api.nvim_create_autocmd("FileType", {
       group = group,
       pattern = "trouble",

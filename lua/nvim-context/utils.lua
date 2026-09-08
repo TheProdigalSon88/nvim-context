@@ -418,23 +418,61 @@ local function split_base_text(text)
 end
 
 ---@param root string
----@param item vim.quickfix.entry
+---@param item vim.quickfix.entry|ContextItem
+---@param opts? RangeDiffOpts
+---@return string|nil, string|nil, string|nil, number|nil, string|nil
+local function range_diff_spec(root, item, opts)
+   opts = opts or {}
+   local git_hash, base_text, relpath, bufnr, abs
+   if type(item.user_data) == "table" then
+      git_hash = item.user_data.git_hash
+      base_text = item.user_data.base_text
+      relpath = Utils.normalize_qf_path(item, root)
+      bufnr = item.bufnr
+      abs = Utils.qf_abspath(item)
+   else
+      git_hash = item.git_hash
+      base_text = item.base_text
+      local filename = item.filename
+      if type(filename) ~= "string" or filename == "" then
+         return nil
+      end
+      if filename:sub(1, 1) == "/" then
+         abs = vim.fn.fnamemodify(filename, ":p")
+         relpath = relativize(abs, root)
+      else
+         relpath = filename
+         abs = root .. "/" .. filename
+      end
+      bufnr = item.bufnr
+   end
+   if opts.source_buf then
+      bufnr = opts.source_buf
+   end
+   return git_hash, base_text, relpath, bufnr, abs
+end
+
+---@param root string
+---@param item vim.quickfix.entry|ContextItem
+---@param opts? RangeDiffOpts
 ---@return RangeDiff|nil
-function Utils.range_diff(root, item)
-   local user_data = type(item.user_data) == "table" and item.user_data or nil
-   if not user_data or not user_data.git_hash or user_data.git_hash == "" then
+function Utils.range_diff(root, item, opts)
+   if type(item) ~= "table" or not root or root == "" then
       return nil
    end
-   local relpath = Utils.normalize_qf_path(item, root)
-   if not relpath then
+   local git_hash, base_text, relpath, bufnr, abs = range_diff_spec(root, item, opts)
+   if not git_hash or git_hash == "" or not relpath then
       return nil
    end
    local start_line, end_line = Utils.qf_range(item)
-   local old = Utils.git_show_lines(root, relpath, user_data.git_hash, start_line, end_line)
+   local old = Utils.git_show_lines(root, relpath, git_hash, start_line, end_line)
    if old == nil then
       return nil
    end
-   local new = Utils.read_qf_source(item, start_line, end_line)
+   local new = Utils.read_qf_source({
+      bufnr = bufnr,
+      filename = abs,
+   }, start_line, end_line)
    old = normalize_diff_lines(old)
    new = normalize_diff_lines(new)
    if lines_equal(old, new) then
@@ -442,7 +480,7 @@ function Utils.range_diff(root, item)
    end
    -- Still matches the captured snippet: not stale, even if the working tree
    -- already differed from git_hash when the item was pinned.
-   local base = split_base_text(user_data.base_text)
+   local base = split_base_text(base_text)
    if base and lines_equal(normalize_diff_lines(base), new) then
       return nil
    end

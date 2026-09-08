@@ -1,6 +1,10 @@
 local Buffer = {}
 
 local log = require("nvim-context.log")
+local utils = require("nvim-context.utils")
+local Diff = require("nvim-context.diff")
+
+local viewer_ns = vim.api.nvim_create_namespace("nvim-context.viewer")
 
 local CODE_DELIMITER = "## Associated Code"
 
@@ -430,6 +434,40 @@ local function item_at_line(heading_lnums, items, cursor_line)
    end
 end
 
+---@param heading_lnums integer[]
+---@param lines string[]
+---@param i integer
+---@return integer, integer
+local function section_bounds(heading_lnums, lines, i)
+   local start = heading_lnums[i] or 1
+   local finish = (heading_lnums[i + 1] or (#lines + 1)) - 1
+   if finish < start then
+      finish = start
+   end
+   while finish > start do
+      local line = lines[finish]
+      if line == "" or line == "---" then
+         finish = finish - 1
+      else
+         break
+      end
+   end
+   return start, finish
+end
+
+---@param source_buf? number
+---@return integer|nil
+local function find_source_win(source_buf)
+   if not source_buf or not vim.api.nvim_buf_is_valid(source_buf) then
+      return nil
+   end
+   for _, win in ipairs(vim.api.nvim_list_wins()) do
+      if vim.api.nvim_win_get_buf(win) == source_buf then
+         return win
+      end
+   end
+end
+
 ---Opens a read-only split showing multiple references.
 ---Default sort is containment (innermost range at top); `s` toggles to
 ---timestamp latest-first. `<CR>` stacks the reference editor in this window;
@@ -439,6 +477,7 @@ end
 ---@param items ContextItem[]
 ---@param source_buf? number   source buffer (used for filetype detection)
 ---@param on_select? fun(item: ContextItem)  called when <CR> is pressed anywhere in a section
+---@param opts? { diagram_enabled?: boolean, diagram_render_keymap?: string, git_root?: string }
 function Buffer.open_references_viewer(items, source_buf, on_select, opts)
    local sort_mode = "containment"
    table.sort(items, SORT_MODES[sort_mode])
@@ -456,7 +495,9 @@ function Buffer.open_references_viewer(items, source_buf, on_select, opts)
    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
    vim.bo[buf].modifiable = false
 
-   opts = opts or {}
+    opts = opts or {}
+   local git_root = opts.git_root
+   local focused_item = nil
    local rendered = false
    local function render_diagrams()
       if not rendered then
@@ -470,12 +511,101 @@ function Buffer.open_references_viewer(items, source_buf, on_select, opts)
       end)
    end
 
-   local win = present_buffer(buf, { on_show = render_diagrams })
+   local function decorate_sections()
+      if not vim.api.nvim_buf_is_valid(buf) then
+         return
+      end
+      vim.api.nvim_buf_clear_namespace(buf, viewer_ns, 0, -1)
+      if not git_root then
+         return
+      end
+      local viewer_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+      for i, item in ipairs(items) do
+         if utils.range_diff(git_root, item, { source_buf = source_buf }) then
+            local start, finish = section_bounds(heading_lnums, viewer_lines, i)
+            for l = start, finish do
+               pcall(vim.api.nvim_buf_set_extmark, buf, viewer_ns, l - 1, 0, {
+                  line_hl_group = "NvimContextChanged",
+                  hl_eol = true,
+               })
+            end
+         end
+      end
+   end
+
+   local function clear_file_marks()
+      Diff.clear(source_buf, Diff.ns)
+   end
+
+   ---@param item ContextItem|nil
+   local function preview_item(item)
+      clear_file_marks()
+      if not item or not git_root then
+         return
+      end
+      if not source_buf or not vim.api.nvim_buf_is_valid(source_buf) then
+         return
+      end
+      local diff = utils.range_diff(git_root, item, { source_buf = source_buf })
+      if not diff then
+         return
+      end
+      local start_line = item.lnum or 1
+      Diff.apply_range_marks(source_buf, Diff.ns, start_line, diff)
+      local source_win = find_source_win(source_buf)
+      if source_win then
+         local line_count = vim.api.nvim_buf_line_count(source_buf)
+         local lnum = math.max(1, math.min(start_line, line_count))
+         pcall(vim.api.nvim_win_set_cursor, source_win, { lnum, 0 })
+      end
+   end
+
+   local win
+   local function preview_from_cursor()
+      local cursor_line = 1
+      if win and vim.api.nvim_win_is_valid(win) then
+         cursor_line = vim.api.nvim_win_get_cursor(win)[1]
+      end
+      local item = item_at_line(heading_lnums, items, cursor_line)
+      if item == focused_item then
+         return
+      end
+      focused_item = item
+      preview_item(item)
+   end
+
+   local function refresh_diff()
+      focused_item = nil
+      decorate_sections()
+      preview_from_cursor()
+   end
+
+   win = present_buffer(buf, {
+      on_show = function()
+         render_diagrams()
+         refresh_diff()
+      end,
+   })
    vim.wo[win].winbar = sort_winbar(sort_mode)
    if opts.diagram_enabled then
       rendered = true
       render_diagrams()
    end
+   refresh_diff()
+
+   vim.api.nvim_create_autocmd("CursorMoved", {
+      buffer = buf,
+      callback = function()
+         preview_from_cursor()
+      end,
+   })
+   vim.api.nvim_create_autocmd({ "WinLeave", "BufWinLeave" }, {
+      buffer = buf,
+      callback = function()
+         focused_item = nil
+         clear_file_marks()
+      end,
+   })
 
    if opts.diagram_render_keymap then
       vim.keymap.set("n", opts.diagram_render_keymap, function()
@@ -531,6 +661,7 @@ function Buffer.open_references_viewer(items, source_buf, on_select, opts)
             diagram.render()
          end
       end
+      refresh_diff()
    end, { buffer = buf, desc = "Toggle sort (containment / timestamp)" })
 
    vim.keymap.set("n", "<CR>", function()
