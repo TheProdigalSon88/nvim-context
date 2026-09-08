@@ -2,8 +2,6 @@ local Buffer = {}
 
 local log = require("nvim-context.log")
 
-local hl_ns = vim.api.nvim_create_namespace("nvim_context_preview")
-
 local CODE_DELIMITER = "## Associated Code"
 
 ---Lines inserted inside a ```mermaid fence for each diagram type.
@@ -174,29 +172,85 @@ function Buffer.open_reference_editor(opts, callback)
    end
 end
 
----Opens a read-only split showing multiple references, newest at top.
----Each item is rendered as its own section with a human-readable timestamp
----heading, an optional description, and a fenced code block.
----@param items ContextItem[]  already sorted newest-first
----@param source_buf? number   source buffer (used for filetype detection)
----@param on_select? fun(item: ContextItem)  called when <CR> is pressed anywhere in a section
-function Buffer.open_references_viewer(items, source_buf, on_select, opts)
-   table.sort(items, function(a, b)
-      return (a.timestamp or "") > (b.timestamp or "")
-   end)
-   local source_loaded = source_buf and vim.api.nvim_buf_is_loaded(source_buf)
-   local lang = source_loaded and vim.bo[source_buf].filetype or ""
+---@param item ContextItem
+---@return integer, integer
+local function item_range(item)
+   local s = item.lnum or 0
+   local e = item.end_lnum or s
+   if e < s then
+      s, e = e, s
+   end
+   return s, e
+end
 
+---True if `outer` strictly contains `inner` (equal ranges are not strict).
+---@param outer ContextItem
+---@param inner ContextItem
+---@return boolean
+local function strictly_contains(outer, inner)
+   local os, oe = item_range(outer)
+   local is, ie = item_range(inner)
+   return os <= is and ie <= oe and (os < is or ie < oe)
+end
+
+---Innermost range first; later timestamp (then id) when ranges are incomparable.
+---@param a ContextItem
+---@param b ContextItem
+---@return boolean
+local function innermost_first(a, b)
+   if strictly_contains(b, a) then
+      return true
+   end
+   if strictly_contains(a, b) then
+      return false
+   end
+   local ta, tb = a.timestamp or "", b.timestamp or ""
+   if ta ~= tb then
+      return ta > tb
+   end
+   return (a.id or 0) > (b.id or 0)
+end
+
+---Later timestamp first; later id when timestamps match.
+---@param a ContextItem
+---@param b ContextItem
+---@return boolean
+local function timestamp_latest_first(a, b)
+   local ta, tb = a.timestamp or "", b.timestamp or ""
+   if ta ~= tb then
+      return ta > tb
+   end
+   return (a.id or 0) > (b.id or 0)
+end
+
+local SORT_MODES = {
+   containment = innermost_first,
+   timestamp = timestamp_latest_first,
+}
+
+local SORT_LABELS = {
+   containment = "containment",
+   timestamp = "timestamp (latest first)",
+}
+
+---@param sort_mode string
+---@return string
+local function sort_winbar(sort_mode)
+   return string.format("s: sort [%s]    <CR>: load    q: close", SORT_LABELS[sort_mode] or sort_mode)
+end
+
+---@param items ContextItem[]
+---@param lang string
+---@return string[], integer[]
+local function render_reference_sections(items, lang)
    local lines = {}
    local heading_lnums = {}
 
    for i, item in ipairs(items) do
-      -- Section heading
       heading_lnums[i] = #lines + 1
       table.insert(lines, "### " .. format_timestamp(item.timestamp) .. " :: " .. item.list_title)
       table.insert(lines, "")
 
-      -- Description (optional)
       local desc = item.description or ""
       if desc ~= "" then
          for line in (desc .. "\n"):gmatch("(.-)\n") do
@@ -205,7 +259,6 @@ function Buffer.open_references_viewer(items, source_buf, on_select, opts)
          table.insert(lines, "")
       end
 
-      -- Fenced code block
       if item.base_text and item.base_text ~= "" then
          table.insert(lines, "```" .. lang)
          for line in (item.base_text .. "\n"):gmatch("(.-)\n") do
@@ -214,13 +267,43 @@ function Buffer.open_references_viewer(items, source_buf, on_select, opts)
          table.insert(lines, "```")
       end
 
-      -- Separator between sections (not after the last one)
       if i < #items then
          table.insert(lines, "")
          table.insert(lines, "---")
          table.insert(lines, "")
       end
    end
+
+   return lines, heading_lnums
+end
+
+---@param heading_lnums integer[]
+---@param items ContextItem[]
+---@param cursor_line integer
+---@return ContextItem|nil
+local function item_at_line(heading_lnums, items, cursor_line)
+   for i = #heading_lnums, 1, -1 do
+      if heading_lnums[i] <= cursor_line then
+         return items[i]
+      end
+   end
+end
+
+---Opens a read-only split showing multiple references.
+---Default sort is containment (innermost range at top); `s` toggles to
+---timestamp latest-first. Each item is rendered as its own section with a
+---human-readable timestamp heading, an optional description, and a fenced
+---code block.
+---@param items ContextItem[]
+---@param source_buf? number   source buffer (used for filetype detection)
+---@param on_select? fun(item: ContextItem)  called when <CR> is pressed anywhere in a section
+function Buffer.open_references_viewer(items, source_buf, on_select, opts)
+   local sort_mode = "containment"
+   table.sort(items, SORT_MODES[sort_mode])
+   local source_loaded = source_buf and vim.api.nvim_buf_is_loaded(source_buf)
+   local lang = source_loaded and vim.bo[source_buf].filetype or ""
+
+   local lines, heading_lnums = render_reference_sections(items, lang)
 
    local buf = vim.api.nvim_create_buf(false, false)
    vim.bo[buf].buftype = "nofile"
@@ -234,6 +317,7 @@ function Buffer.open_references_viewer(items, source_buf, on_select, opts)
    vim.cmd("botright vsplit")
    vim.api.nvim_win_set_buf(0, buf)
    local win = vim.api.nvim_get_current_win()
+   vim.wo[win].winbar = sort_winbar(sort_mode)
 
    opts = opts or {}
    local rendered = false
@@ -269,18 +353,48 @@ function Buffer.open_references_viewer(items, source_buf, on_select, opts)
       end
    end, { buffer = buf, desc = "Close references viewer" })
 
+   vim.keymap.set("n", "s", function()
+      local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
+      local focused = item_at_line(heading_lnums, items, cursor_line)
+      sort_mode = sort_mode == "containment" and "timestamp" or "containment"
+      table.sort(items, SORT_MODES[sort_mode])
+      local new_lines
+      new_lines, heading_lnums = render_reference_sections(items, lang)
+      vim.bo[buf].modifiable = true
+      vim.api.nvim_buf_set_lines(buf, 0, -1, false, new_lines)
+      vim.bo[buf].modifiable = false
+      if vim.api.nvim_win_is_valid(win) then
+         vim.wo[win].winbar = sort_winbar(sort_mode)
+      end
+
+      local target_line = 1
+      if focused then
+         for i, item in ipairs(items) do
+            if item == focused then
+               target_line = heading_lnums[i]
+               break
+            end
+         end
+      end
+      if vim.api.nvim_win_is_valid(win) then
+         vim.api.nvim_win_set_cursor(win, { target_line, 0 })
+      end
+
+      if rendered then
+         local ok, diagram = pcall(require, "diagram")
+         if ok then
+            diagram.clear()
+            diagram.render()
+         end
+      end
+   end, { buffer = buf, desc = "Toggle sort (containment / timestamp)" })
+
    vim.keymap.set("n", "<CR>", function()
       if not on_select then
          return
       end
       local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
-      local selected_item
-      for i = #heading_lnums, 1, -1 do
-         if heading_lnums[i] <= cursor_line then
-            selected_item = items[i]
-            break
-         end
-      end
+      local selected_item = item_at_line(heading_lnums, items, cursor_line)
       if selected_item then
          local ok, err = pcall(on_select, selected_item)
          if vim.api.nvim_win_is_valid(win) then
