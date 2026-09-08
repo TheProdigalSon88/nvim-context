@@ -193,6 +193,25 @@ function Utils.qf_range(item)
    return start_line, end_line
 end
 
+---@param item vim.quickfix.entry|nil
+---@return boolean
+function Utils.is_context_item(item)
+   return type(item) == "table"
+      and type(item.user_data) == "table"
+      and type(item.user_data.git_hash) == "string"
+      and item.user_data.git_hash ~= ""
+end
+
+---@param item vim.quickfix.entry
+---@return string|nil
+function Utils.git_root_for_item(item)
+   local abs = Utils.qf_abspath(item)
+   if abs and abs ~= "" then
+      return vim.fs.root(abs, ".git")
+   end
+   return vim.fs.root(0, ".git")
+end
+
 ---@param item vim.quickfix.entry
 ---@param start_line number
 ---@param end_line number

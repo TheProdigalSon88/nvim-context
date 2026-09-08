@@ -6,25 +6,6 @@ local M = {}
 
 local ns = vim.api.nvim_create_namespace("nvim-context.trouble")
 
----@param item vim.quickfix.entry
----@return boolean
-local function is_context_item(item)
-   return type(item) == "table"
-      and type(item.user_data) == "table"
-      and type(item.user_data.git_hash) == "string"
-      and item.user_data.git_hash ~= ""
-end
-
----@param item vim.quickfix.entry
----@return string|nil
-local function git_root_for_item(item)
-   local abs = utils.qf_abspath(item)
-   if abs and abs ~= "" then
-      return vim.fs.root(abs, ".git")
-   end
-   return vim.fs.root(0, ".git")
-end
-
 ---@param buf number
 local function decorate_list(buf)
    if not vim.api.nvim_buf_is_valid(buf) then
@@ -50,8 +31,8 @@ local function decorate_list(buf)
 
    for row, loc in pairs(view.renderer._locations) do
       local raw = loc.item and loc.item.item
-      if is_context_item(raw) then
-         local root = git_root_for_item(raw)
+      if utils.is_context_item(raw) then
+         local root = utils.git_root_for_item(raw)
          if root and utils.range_diff(root, raw) then
             pcall(vim.api.nvim_buf_set_extmark, buf, ns, row - 1, 0, {
                line_hl_group = "NvimContextChanged",
@@ -69,21 +50,16 @@ local function preview_context_item(item, ctx)
       return
    end
    local raw = item and item.item
-   if not is_context_item(raw) then
+   if not utils.is_context_item(raw) then
       return
    end
-   local root = git_root_for_item(raw)
-   if not root then
-      return
-   end
-   local diff = utils.range_diff(root, raw)
-   if not diff then
+   local root = utils.git_root_for_item(raw)
+   if not root or not utils.range_diff(root, raw) then
       return
    end
    local Render = require("trouble.view.render")
    Render.reset(ctx.buf)
-   local start_line = utils.qf_range(raw)
-   Diff.apply_range_marks(ctx.buf, Render.ns, start_line, diff)
+   Diff.preview_item(ctx.buf, raw, Render.ns)
 end
 
 function M.setup()

@@ -55,6 +55,7 @@ end
 function Context.setup(opts)
    Context.Options = vim.tbl_deep_extend("force", defaults, opts or {})
    require("nvim-context.diff").setup()
+   require("nvim-context.qf").setup()
    if Context.Options.diagram.enabled then
       setup_diagram_plugins()
    end
@@ -857,6 +858,15 @@ function Context.DeleteReference(line1)
       return
    end
    delete_qf_index(line1 or vim.fn.line("."))
+end
+
+function Context.ToggleQfDiff()
+   local on = require("nvim-context.qf").toggle()
+   if on then
+      log.info("qf jump diff on")
+   else
+      log.info("qf jump diff off")
+   end
 end
 
 function Context.DeleteTroubleItem(ctx)

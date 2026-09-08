@@ -1,3 +1,5 @@
+local utils = require("nvim-context.utils")
+
 local M = {}
 
 M.ns = vim.api.nvim_create_namespace("nvim-context.diff")
@@ -32,6 +34,30 @@ function M.clear(buf, ns)
    if buf and vim.api.nvim_buf_is_valid(buf) then
       vim.api.nvim_buf_clear_namespace(buf, ns or M.ns, 0, -1)
    end
+end
+
+---@param buf number
+---@param item vim.quickfix.entry
+---@param ns number
+---@return boolean applied
+function M.preview_item(buf, item, ns)
+   if not buf or not vim.api.nvim_buf_is_valid(buf) then
+      return false
+   end
+   if not utils.is_context_item(item) then
+      return false
+   end
+   local root = utils.git_root_for_item(item)
+   if not root then
+      return false
+   end
+   local diff = utils.range_diff(root, item, { source_buf = buf })
+   if not diff then
+      return false
+   end
+   local start_line = utils.qf_range(item)
+   M.apply_range_marks(buf, ns, start_line, diff)
+   return true
 end
 
 ---@param buf number
