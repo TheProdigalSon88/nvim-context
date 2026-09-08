@@ -58,6 +58,140 @@ local function find_delimiter(lines, delimiter)
    end
 end
 
+---@class ContextBufferFrame
+---@field buf integer
+---@field cursor integer[]
+---@field winbar string
+---@field on_show? fun()
+
+---@type table<integer, ContextBufferFrame[]>
+local stacks = {}
+
+---@param buf integer|nil
+local function stack_wipe(buf)
+   if buf and vim.api.nvim_buf_is_valid(buf) then
+      pcall(vim.api.nvim_buf_delete, buf, { force = true })
+   end
+end
+
+---@param win integer
+local function stack_cleanup(win)
+   local stack = stacks[win]
+   stacks[win] = nil
+   if not stack then
+      return
+   end
+   for _, frame in ipairs(stack) do
+      stack_wipe(frame.buf)
+   end
+end
+
+---@param win integer
+local function stack_ensure_cleanup(win)
+   vim.api.nvim_create_autocmd("WinClosed", {
+      pattern = tostring(win),
+      once = true,
+      nested = true,
+      callback = function()
+         stack_cleanup(win)
+      end,
+   })
+end
+
+---@param win integer
+local function stack_save_top(win)
+   local stack = stacks[win]
+   if not stack or #stack == 0 or not vim.api.nvim_win_is_valid(win) then
+      return
+   end
+   local top = stack[#stack]
+   top.cursor = vim.api.nvim_win_get_cursor(win)
+   top.winbar = vim.wo[win].winbar or ""
+end
+
+---@param win integer
+---@param frame ContextBufferFrame
+local function stack_show(win, frame)
+   if not vim.api.nvim_win_is_valid(win) or not vim.api.nvim_buf_is_valid(frame.buf) then
+      return
+   end
+   vim.api.nvim_win_set_buf(win, frame.buf)
+   local line_count = vim.api.nvim_buf_line_count(frame.buf)
+   local cursor = frame.cursor or { 1, 0 }
+   local lnum = math.max(1, math.min(cursor[1] or 1, line_count))
+   local col = math.max(0, cursor[2] or 0)
+   pcall(vim.api.nvim_win_set_cursor, win, { lnum, col })
+   vim.wo[win].winbar = frame.winbar or ""
+   if frame.on_show then
+      frame.on_show()
+   end
+end
+
+---@param win integer
+local function stack_pop(win)
+   if not vim.api.nvim_win_is_valid(win) then
+      stack_cleanup(win)
+      return
+   end
+   local stack = stacks[win]
+   if not stack or #stack == 0 then
+      return
+   end
+   local top = table.remove(stack)
+   if #stack == 0 then
+      stacks[win] = nil
+      if vim.api.nvim_win_is_valid(win) then
+         vim.api.nvim_win_close(win, true)
+      end
+      stack_wipe(top.buf)
+      return
+   end
+   local prev = stack[#stack]
+   if vim.api.nvim_buf_is_valid(prev.buf) then
+      stack_show(win, prev)
+   else
+      stack_wipe(top.buf)
+      stack_pop(win)
+      return
+   end
+   stack_wipe(top.buf)
+end
+
+---@param buf integer
+---@param opts? { on_show?: fun() }
+---@return integer
+local function present_buffer(buf, opts)
+   opts = opts or {}
+   local win = vim.api.nvim_get_current_win()
+   local stack = stacks[win]
+   if stack and #stack > 0 then
+      stack_save_top(win)
+      vim.api.nvim_win_set_buf(win, buf)
+      vim.wo[win].winbar = ""
+      table.insert(stack, {
+         buf = buf,
+         cursor = { 1, 0 },
+         winbar = "",
+         on_show = opts.on_show,
+      })
+      return win
+   end
+
+   vim.cmd("botright vsplit")
+   win = vim.api.nvim_get_current_win()
+   vim.api.nvim_win_set_buf(win, buf)
+   stacks[win] = {
+      {
+         buf = buf,
+         cursor = { 1, 0 },
+         winbar = "",
+         on_show = opts.on_show,
+      },
+   }
+   stack_ensure_cleanup(win)
+   return win
+end
+
 ---@param opts ReferenceBuffer
 ---@param callback function
 function Buffer.open_reference_editor(opts, callback)
@@ -87,7 +221,7 @@ function Buffer.open_reference_editor(opts, callback)
 
    local buf = vim.api.nvim_create_buf(false, false)
    vim.bo[buf].buftype = "acwrite"
-   vim.bo[buf].bufhidden = "wipe"
+   vim.bo[buf].bufhidden = "hide"
    vim.bo[buf].swapfile = false
    vim.bo[buf].filetype = "markdown"
    vim.api.nvim_buf_set_name(buf, "nvim-context-reference://" .. buf .. ".md")
@@ -96,11 +230,10 @@ function Buffer.open_reference_editor(opts, callback)
       vim.bo[buf].modifiable = false
    end
 
-   vim.cmd("botright " .. "vsplit")
-   vim.api.nvim_win_set_buf(0, buf)
-   local win = vim.api.nvim_get_current_win()
-
-   if opts.diagram_enabled then
+   local function render_diagrams()
+      if not opts.diagram_enabled then
+         return
+      end
       vim.schedule(function()
          local ok, diagram = pcall(require, "diagram")
          if ok then
@@ -108,6 +241,15 @@ function Buffer.open_reference_editor(opts, callback)
          end
       end)
    end
+
+   local win = present_buffer(buf, {
+      on_show = opts.diagram_enabled and render_diagrams or nil,
+   })
+   local stacked = stacks[win] and #stacks[win] > 1
+   if stacked then
+      vim.wo[win].winbar = "q: back"
+   end
+   render_diagrams()
 
    local done = false
    local function finish(description, labels)
@@ -131,9 +273,7 @@ function Buffer.open_reference_editor(opts, callback)
          local description = table.concat(reference_lines, "\n"):gsub("^%s+", ""):gsub("%s+$", "")
          vim.bo[buf].modified = false
          finish(description)
-         if vim.api.nvim_win_is_valid(win) then
-            vim.api.nvim_win_close(win, true)
-         end
+         stack_pop(win)
       end,
    })
 
@@ -146,10 +286,11 @@ function Buffer.open_reference_editor(opts, callback)
    })
 
    vim.keymap.set("n", "q", function()
-      if vim.api.nvim_win_is_valid(win) then
-         vim.api.nvim_win_close(win, true)
-      end
-   end, { buffer = buf, desc = "Close note editor without saving" })
+      stack_pop(win)
+   end, {
+      buffer = buf,
+      desc = stacked and "Return to previous context buffer" or "Close note editor without saving",
+   })
 
    if opts.diagram_snippets and not opts.readonly then
       for keymap_str, diagram_type in pairs(opts.diagram_snippets) do
@@ -291,9 +432,10 @@ end
 
 ---Opens a read-only split showing multiple references.
 ---Default sort is containment (innermost range at top); `s` toggles to
----timestamp latest-first. Each item is rendered as its own section with a
----human-readable timestamp heading, an optional description, and a fenced
----code block.
+---timestamp latest-first. `<CR>` stacks the reference editor in this window;
+---`q` pops back (or closes when this is the last frame). Each item is
+---rendered as its own section with a human-readable timestamp heading, an
+---optional description, and a fenced code block.
 ---@param items ContextItem[]
 ---@param source_buf? number   source buffer (used for filetype detection)
 ---@param on_select? fun(item: ContextItem)  called when <CR> is pressed anywhere in a section
@@ -307,28 +449,32 @@ function Buffer.open_references_viewer(items, source_buf, on_select, opts)
 
    local buf = vim.api.nvim_create_buf(false, false)
    vim.bo[buf].buftype = "nofile"
-   vim.bo[buf].bufhidden = "wipe"
+   vim.bo[buf].bufhidden = "hide"
    vim.bo[buf].swapfile = false
    vim.bo[buf].filetype = "markdown"
    vim.api.nvim_buf_set_name(buf, "nvim-context-references://" .. buf .. ".md")
    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
    vim.bo[buf].modifiable = false
 
-   vim.cmd("botright vsplit")
-   vim.api.nvim_win_set_buf(0, buf)
-   local win = vim.api.nvim_get_current_win()
-   vim.wo[win].winbar = sort_winbar(sort_mode)
-
    opts = opts or {}
    local rendered = false
-   if opts.diagram_enabled then
-      rendered = true
+   local function render_diagrams()
+      if not rendered then
+         return
+      end
       vim.schedule(function()
          local ok, diagram = pcall(require, "diagram")
          if ok then
             diagram.render()
          end
       end)
+   end
+
+   local win = present_buffer(buf, { on_show = render_diagrams })
+   vim.wo[win].winbar = sort_winbar(sort_mode)
+   if opts.diagram_enabled then
+      rendered = true
+      render_diagrams()
    end
 
    if opts.diagram_render_keymap then
@@ -348,9 +494,7 @@ function Buffer.open_references_viewer(items, source_buf, on_select, opts)
    end
 
    vim.keymap.set("n", "q", function()
-      if vim.api.nvim_win_is_valid(win) then
-         vim.api.nvim_win_close(win, true)
-      end
+      stack_pop(win)
    end, { buffer = buf, desc = "Close references viewer" })
 
    vim.keymap.set("n", "s", function()
@@ -397,9 +541,6 @@ function Buffer.open_references_viewer(items, source_buf, on_select, opts)
       local selected_item = item_at_line(heading_lnums, items, cursor_line)
       if selected_item then
          local ok, err = pcall(on_select, selected_item)
-         if vim.api.nvim_win_is_valid(win) then
-            vim.api.nvim_win_close(win, true)
-         end
          if not ok then
             log.error("error selecting context: " .. tostring(err))
          end
