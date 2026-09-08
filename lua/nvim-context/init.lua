@@ -317,13 +317,15 @@ local function edit_reference_lines(idx)
 
       vim.api.nvim_create_autocmd("ModeChanged", {
          group = augroup,
-         buffer = bufnr,
          pattern = "[vV\22]:n",
-         once = true,
          callback = function()
-            if range_edit and not range_edit.committing then
-               cleanup_range_edit()
+            if not range_edit or range_edit.committing then
+               return
             end
+            if vim.api.nvim_get_current_buf() ~= bufnr then
+               return
+            end
+            cleanup_range_edit()
          end,
       })
       vim.api.nvim_create_autocmd("BufWipeout", {
