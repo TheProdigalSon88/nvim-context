@@ -44,6 +44,11 @@
 ---@field git_hash string|nil
 ---@field timestamp string|osdate
 
+---@class RangeDiff
+---@field old string[]
+---@field new string[]
+---@field hunks integer[][]
+
 ---@class ContextDiagramOptions
 ---@field enabled? boolean
 ---@field snippets? table<string, string> map of keymap string -> diagram type

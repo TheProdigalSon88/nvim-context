@@ -203,6 +203,11 @@ function Utils.read_qf_source(item, start_line, end_line)
       and item.bufnr > 0
       and vim.api.nvim_buf_is_valid(item.bufnr)
       and vim.api.nvim_buf_is_loaded(item.bufnr)
+      and vim.bo[item.bufnr].buftype == ""
+      and (
+         vim.bo[item.bufnr].modified
+         or vim.api.nvim_buf_line_count(item.bufnr) >= end_line
+      )
    then
       return vim.api.nvim_buf_get_lines(item.bufnr, start_line - 1, end_line, false)
    end
@@ -310,6 +315,150 @@ function Utils.git_hash()
       return nil
    end
    return hash
+end
+
+---@type table<string, string[]|false>
+local git_file_cache = {}
+
+---@param root string
+---@param relpath string
+---@param git_hash string
+---@return string[]|nil
+local function git_show_file(root, relpath, git_hash)
+   if not root or root == "" or not relpath or relpath == "" or not git_hash or git_hash == "" then
+      return nil
+   end
+   local key = root .. "\0" .. git_hash .. "\0" .. relpath
+   local cached = git_file_cache[key]
+   if cached ~= nil then
+      return cached ~= false and cached or nil
+   end
+   local lines = vim.fn.systemlist({ "git", "-C", root, "show", git_hash .. ":" .. relpath })
+   if vim.v.shell_error ~= 0 or type(lines) ~= "table" then
+      git_file_cache[key] = false
+      return nil
+   end
+   git_file_cache[key] = lines
+   return lines
+end
+
+---@param root string
+---@param relpath string
+---@param git_hash string
+---@param start_line number
+---@param end_line number
+---@return string[]|nil
+function Utils.git_show_lines(root, relpath, git_hash, start_line, end_line)
+   local lines = git_show_file(root, relpath, git_hash)
+   if lines == nil then
+      return nil
+   end
+   start_line = math.max(1, start_line or 1)
+   end_line = math.max(start_line, end_line or start_line)
+   if start_line > #lines then
+      return {}
+   end
+   return vim.list_slice(lines, start_line, math.min(end_line, #lines))
+end
+
+---@param lines string[]
+---@return string[]
+local function normalize_diff_lines(lines)
+   if not lines or #lines == 0 then
+      return {}
+   end
+   local out = {}
+   for i = 1, #lines do
+      out[i] = (lines[i] or ""):gsub("\r$", "")
+   end
+   local n = #out
+   while n > 0 and out[n] == "" do
+      n = n - 1
+   end
+   if n == #out then
+      return out
+   end
+   if n == 0 then
+      return {}
+   end
+   return vim.list_slice(out, 1, n)
+end
+
+---@param lines string[]
+---@return string
+local function lines_to_diff_text(lines)
+   if not lines or #lines == 0 then
+      return ""
+   end
+   return table.concat(lines, "\n") .. "\n"
+end
+
+---@param a string[]
+---@param b string[]
+---@return boolean
+local function lines_equal(a, b)
+   if #a ~= #b then
+      return false
+   end
+   for i = 1, #a do
+      if a[i] ~= b[i] then
+         return false
+      end
+   end
+   return true
+end
+
+---@param text string|nil
+---@return string[]|nil
+local function split_base_text(text)
+   if type(text) ~= "string" or text == "" then
+      return nil
+   end
+   return vim.split(text, "\n", { plain = true })
+end
+
+---@param root string
+---@param item vim.quickfix.entry
+---@return RangeDiff|nil
+function Utils.range_diff(root, item)
+   local user_data = type(item.user_data) == "table" and item.user_data or nil
+   if not user_data or not user_data.git_hash or user_data.git_hash == "" then
+      return nil
+   end
+   local relpath = Utils.normalize_qf_path(item, root)
+   if not relpath then
+      return nil
+   end
+   local start_line, end_line = Utils.qf_range(item)
+   local old = Utils.git_show_lines(root, relpath, user_data.git_hash, start_line, end_line)
+   if old == nil then
+      return nil
+   end
+   local new = Utils.read_qf_source(item, start_line, end_line)
+   old = normalize_diff_lines(old)
+   new = normalize_diff_lines(new)
+   if lines_equal(old, new) then
+      return nil
+   end
+   -- Still matches the captured snippet: not stale, even if the working tree
+   -- already differed from git_hash when the item was pinned.
+   local base = split_base_text(user_data.base_text)
+   if base and lines_equal(normalize_diff_lines(base), new) then
+      return nil
+   end
+   local hunks = vim.diff(lines_to_diff_text(old), lines_to_diff_text(new), {
+      result_type = "indices",
+      algorithm = "histogram",
+   })
+   if type(hunks) ~= "table" or #hunks == 0 then
+      return nil
+   end
+   ---@type RangeDiff
+   return {
+      old = old,
+      new = new,
+      hunks = hunks,
+   }
 end
 
 ---@param bufnr number

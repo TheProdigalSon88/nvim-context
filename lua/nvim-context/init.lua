@@ -53,6 +53,9 @@ function Context.setup(opts)
    if Context.Options.diagram.enabled then
       setup_diagram_plugins()
    end
+   if Context.Options.trouble then
+      require("nvim-context.trouble").setup()
+   end
 end
 
 function Context.AddReference()
