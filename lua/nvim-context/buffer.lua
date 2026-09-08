@@ -381,7 +381,10 @@ local SORT_LABELS = {
 ---@param sort_mode string
 ---@return string
 local function sort_winbar(sort_mode)
-   return string.format("s: sort [%s]    <CR>: load    q: close", SORT_LABELS[sort_mode] or sort_mode)
+   return string.format(
+      "s: sort [%s]    a: activate    <CR>: note    q: close",
+      SORT_LABELS[sort_mode] or sort_mode
+   )
 end
 
 ---@param items ContextItem[]
@@ -470,14 +473,15 @@ end
 
 ---Opens a read-only split showing multiple references.
 ---Default sort is containment (innermost range at top); `s` toggles to
----timestamp latest-first. `<CR>` stacks the reference editor in this window;
----`q` pops back (or closes when this is the last frame). Each item is
+---timestamp latest-first. `a` activates the section's parent context without
+---leaving the viewer. `<CR>` activates and stacks the reference editor in this
+---window; `q` pops back (or closes when this is the last frame). Each item is
 ---rendered as its own section with a human-readable timestamp heading, an
 ---optional description, and a fenced code block.
 ---@param items ContextItem[]
 ---@param source_buf? number   source buffer (used for filetype detection)
 ---@param on_select? fun(item: ContextItem)  called when <CR> is pressed anywhere in a section
----@param opts? { diagram_enabled?: boolean, diagram_render_keymap?: string, git_root?: string }
+---@param opts? { diagram_enabled?: boolean, diagram_render_keymap?: string, git_root?: string, on_activate?: fun(item: ContextItem) }
 function Buffer.open_references_viewer(items, source_buf, on_select, opts)
    local sort_mode = "containment"
    table.sort(items, SORT_MODES[sort_mode])
@@ -676,7 +680,20 @@ function Buffer.open_references_viewer(items, source_buf, on_select, opts)
             log.error("error selecting context: " .. tostring(err))
          end
       end
-   end, { buffer = buf, desc = "Load context and view note" })
+    end, { buffer = buf, desc = "Load context and view note" })
+
+   if opts.on_activate then
+      vim.keymap.set("n", "a", function()
+         local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
+         local selected_item = item_at_line(heading_lnums, items, cursor_line)
+         if selected_item then
+            local ok, err = pcall(opts.on_activate, selected_item)
+            if not ok then
+               log.error("error activating context: " .. tostring(err))
+            end
+         end
+      end, { buffer = buf, desc = "Make section context active" })
+   end
 end
 
 return Buffer

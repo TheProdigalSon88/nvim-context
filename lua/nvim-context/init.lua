@@ -93,7 +93,7 @@ function Context.AddReference()
          text = display_text,
          ---@type UserData
          user_data = {
-            id = nil,
+           id = nil,
             description = description,
             base_text = base_text,
             display_text = display_text,
@@ -441,6 +441,33 @@ local function push_loaded(entry, action)
    apply_loaded(entry, action)
 end
 
+---@param list_id number|string|nil
+---@return boolean
+local function activate_or_push(list_id)
+   if list_id == nil or list_id == "" then
+      log.error("reference has no parent context")
+      return false
+   end
+   local stacked_idx = find_stack_idx_by_id(list_id)
+   if stacked_idx then
+      activate_idx(stacked_idx, "r")
+      log.info("loaded context: " .. Context.stack[1].title)
+      return true
+   end
+   local load_ok, data = pcall(sql.load_list, Context.root, list_id)
+   if not load_ok or not data then
+      log.error("failed to load context: " .. tostring(data))
+      return false
+   end
+   push_loaded({
+      title = data.title,
+      items = utils.dbrows_to_qfitems(data.items, Context.root),
+      context = { description = data.description, id = data.id },
+   }, " ")
+   log.info("loaded context: " .. data.title)
+   return true
+end
+
 local function adopt_current_qf()
    table.insert(Context.stack, 1, qf_snapshot())
    Context.active_idx = 1
@@ -729,19 +756,9 @@ function Context.ShowReference(line1, line2)
    end
 
    buffer.open_references_viewer(items, bufnr, function(item)
-      local load_ok, data = pcall(sql.load_list, Context.root, item.list_id)
-      if not load_ok or not data then
-         log.error("failed to load context: " .. tostring(data))
+      if not activate_or_push(item.list_id) then
          return
       end
-      snapshot_active()
-      Context.active_idx = nil
-      vim.fn.setqflist({}, " ", {
-         title = data.title,
-         items = utils.dbrows_to_qfitems(data.items, Context.root),
-         context = { description = data.description, id = data.id },
-      })
-      log.info("loaded context: " .. data.title)
       buffer.open_reference_editor({
          default = item.description,
          code = item.base_text,
@@ -753,6 +770,9 @@ function Context.ShowReference(line1, line2)
    end, {
       diagram_enabled = Context.Options.diagram.enabled,
       git_root = Context.root,
+      on_activate = function(item)
+         activate_or_push(item.list_id)
+      end,
    })
 end
 
