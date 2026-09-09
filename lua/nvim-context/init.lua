@@ -537,6 +537,72 @@ function Context.LoadContext()
       }
       push_loaded(selectedContext, " ")
       log.info("loaded context: " .. choice.title)
+    end)
+end
+
+function Context.DeleteContext()
+   if not Context.root then
+      Context.root = vim.fs.root(0, ".git")
+      if not Context.root then
+         log.error("not inside a git repository")
+         return
+      end
+   end
+
+   ---@type boolean,ContextListItem[]
+   local ok, titles = pcall(sql.list_titles, Context.root)
+   if not ok then
+      log.error("failed to read contexts: " .. tostring(titles))
+      return
+   end
+   if not titles or #titles == 0 then
+      log.info("no saved contexts")
+      return
+   end
+
+   vim.ui.select(titles, {
+      prompt = "Delete context:",
+      format_item = function(item)
+         return item.title
+      end,
+   }, function(choice)
+      if not choice then
+         return
+      end
+
+      vim.ui.select({ "Cancel", "Delete from database" }, {
+         prompt = string.format("Delete '%s'? This removes it from the database.", choice.title),
+      }, function(confirm)
+         if confirm ~= "Delete from database" then
+            return
+         end
+
+         local del_ok, err = pcall(sql.delete_context, Context.root, choice.id)
+         if not del_ok then
+            log.error("failed to delete context: " .. tostring(err))
+            return
+         end
+
+         local stacked_idx = find_stack_idx_by_id(choice.id)
+         if stacked_idx then
+            local was_active = stacked_idx == Context.active_idx
+            table.remove(Context.stack, stacked_idx)
+            if was_active then
+               if #Context.stack > 0 then
+                  Context.active_idx = 1
+                  apply_loaded(Context.stack[1], "r")
+               else
+                  Context.active_idx = nil
+                  vim.fn.setqflist({}, "r", { title = "", items = {}, context = {} })
+                  if Context.Options and Context.Options.trouble then
+                     require("trouble").refresh("qflist")
+                  end
+               end
+            end
+         end
+
+         log.info("deleted context: " .. choice.title)
+      end)
    end)
 end
 

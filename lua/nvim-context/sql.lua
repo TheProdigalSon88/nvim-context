@@ -200,6 +200,28 @@ function M.delete_items(root, ids)
 end
 
 ---@param root string
+---@param id number
+function M.delete_context(root, id)
+  local d = get_db(root)
+  if not d then
+    error("nvim-context: database unavailable")
+  end
+
+  local existing = d.lists:get({ where = { id = id } })
+  if not existing or not existing[1] then
+    error("no saved list found with id: " .. tostring(id))
+  end
+  local title = existing[1].title
+
+  d.items:remove({ where = { list_id = id } })
+  d.lists:remove({ where = { id = id } })
+
+  Caching.invalidate("titles:" .. root)
+  Caching.invalidate("Context:" .. root .. ":" .. title)
+  Caching.invalidate("Context:" .. root .. ":" .. id)
+end
+
+---@param root string
 ---@param updated_context ContextList
 ---@param new_items ContextItem[]
 ---@param updated_items UpdateContextItem[]
