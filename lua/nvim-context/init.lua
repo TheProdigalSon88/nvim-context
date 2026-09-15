@@ -1216,6 +1216,15 @@ function Context.ToggleQfDiff()
    end
 end
 
+function Context.ToggleQfViewer()
+   local on = require("nvim-context.qf").toggle_viewer()
+   if on then
+      log.info("qf reference viewer on")
+   else
+      log.info("qf reference viewer off")
+   end
+end
+
 function Context.DeleteTroubleItem(ctx)
    if not (Context.Options and Context.Options.trouble) then
       log.info("trouble not enabled")

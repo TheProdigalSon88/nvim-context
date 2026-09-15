@@ -224,9 +224,9 @@ local function present_buffer(buf, opts)
    return win
 end
 
----@param opts ReferenceBuffer
----@param callback function
-function Buffer.open_reference_editor(opts, callback)
+---@param opts { default?: string, code?: string, source_buf?: number }
+---@return string[]
+local function build_reference_lines(opts)
    local lines = {}
    for line in ((opts.default or "") .. "\n"):gmatch("(.-)\n") do
       table.insert(lines, line)
@@ -250,6 +250,14 @@ function Buffer.open_reference_editor(opts, callback)
       end
       table.insert(lines, "```")
    end
+
+   return lines
+end
+
+---@param opts ReferenceBuffer
+---@param callback function
+function Buffer.open_reference_editor(opts, callback)
+   local lines = build_reference_lines(opts)
 
    local buf = vim.api.nvim_create_buf(false, false)
    vim.bo[buf].buftype = "acwrite"
@@ -805,6 +813,181 @@ function Buffer.open_references_viewer(items, source_buf, on_select, opts)
          end
       end, { buffer = buf, nowait = true, silent = true, desc = "Copy reference to another loaded context" })
    end
+end
+
+---@class QfFollowState
+---@field win integer|nil
+---@field buf integer|nil
+---@field on_close? fun()
+---@field diagram_enabled? boolean
+
+---@type QfFollowState
+local follow = {}
+local follow_closing = false
+
+local function follow_win_valid()
+   return follow.win and vim.api.nvim_win_is_valid(follow.win)
+end
+
+local function follow_buf_valid()
+   return follow.buf and vim.api.nvim_buf_is_valid(follow.buf)
+end
+
+---@param opts? { user?: boolean }
+function Buffer.close_qf_follow(opts)
+   opts = opts or {}
+   local on_close = follow.on_close
+   local win = follow.win
+   local buf = follow.buf
+   follow = {}
+   if opts.user and on_close then
+      on_close()
+   end
+   follow_closing = true
+   if win and vim.api.nvim_win_is_valid(win) then
+      pcall(vim.api.nvim_win_close, win, true)
+   end
+   if buf and vim.api.nvim_buf_is_valid(buf) then
+      pcall(vim.api.nvim_buf_delete, buf, { force = true })
+   end
+   follow_closing = false
+end
+
+---@return integer|nil
+local function find_follow_split_win()
+   local function usable(win)
+      if follow.win and win == follow.win then
+         return false
+      end
+      if vim.w[win].trouble or vim.w[win].trouble_preview then
+         return false
+      end
+      local buf = vim.api.nvim_win_get_buf(win)
+      return vim.bo[buf].buftype == ""
+   end
+
+   local current = vim.api.nvim_get_current_win()
+   if usable(current) then
+      return current
+   end
+   for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      if usable(win) then
+         return win
+      end
+   end
+   if follow.win and current == follow.win then
+      return nil
+   end
+   return current
+end
+
+local function ensure_follow_buf()
+   if follow_buf_valid() then
+      return follow.buf
+   end
+   local buf = vim.api.nvim_create_buf(false, true)
+   vim.bo[buf].buftype = "nofile"
+   vim.bo[buf].bufhidden = "wipe"
+   vim.bo[buf].swapfile = false
+   vim.bo[buf].filetype = "markdown"
+   vim.api.nvim_buf_set_name(buf, "nvim-context-qf-follow://reference.md")
+   vim.keymap.set("n", "q", function()
+      Buffer.close_qf_follow({ user = true })
+   end, { buffer = buf, desc = "Close reference viewer" })
+   follow.buf = buf
+   return buf
+end
+
+local function ensure_follow_win(buf)
+   if follow_win_valid() then
+      if vim.api.nvim_win_get_buf(follow.win) ~= buf then
+         pcall(function()
+            vim.wo[follow.win].winfixbuf = false
+         end)
+         vim.api.nvim_win_set_buf(follow.win, buf)
+      end
+      pcall(function()
+         vim.wo[follow.win].winfixbuf = true
+      end)
+      return follow.win
+   end
+
+   local split_win = find_follow_split_win()
+   if not split_win then
+      return nil
+   end
+   local new_win
+   vim.api.nvim_win_call(split_win, function()
+      vim.cmd("botright vsplit")
+      new_win = vim.api.nvim_get_current_win()
+   end)
+   if not new_win or not vim.api.nvim_win_is_valid(new_win) then
+      return nil
+   end
+   vim.api.nvim_win_set_buf(new_win, buf)
+   vim.wo[new_win].winbar = "q: close"
+   pcall(function()
+      vim.wo[new_win].winfixbuf = true
+   end)
+   follow.win = new_win
+   vim.api.nvim_create_autocmd("WinClosed", {
+      pattern = tostring(new_win),
+      once = true,
+      nested = true,
+      callback = function()
+         if follow_closing or follow.win ~= new_win then
+            return
+         end
+         Buffer.close_qf_follow({ user = true })
+      end,
+   })
+   return new_win
+end
+
+local function render_follow_diagrams()
+   if not follow.diagram_enabled or not follow_win_valid() then
+      return
+   end
+   vim.schedule(function()
+      if not follow_win_valid() then
+         return
+      end
+      vim.api.nvim_win_call(follow.win, function()
+         local ok, diagram = pcall(require, "diagram")
+         if ok then
+            diagram.clear()
+            diagram.render()
+         end
+      end)
+   end)
+end
+
+---Show the current quickfix context item in a persistent readonly split.
+---Does not steal focus. `winfixbuf` keeps `:cnext` / `:cprev` from replacing
+---the window; contents update in place as the qf index changes.
+---@param item vim.quickfix.entry
+---@param opts? { diagram_enabled?: boolean, on_close?: fun() }
+function Buffer.show_qf_follow(item, opts)
+   opts = opts or {}
+   follow.on_close = opts.on_close
+   follow.diagram_enabled = opts.diagram_enabled
+
+   local user_data = type(item.user_data) == "table" and item.user_data or {}
+   local buf = ensure_follow_buf()
+   local lines = build_reference_lines({
+      default = user_data.description or "",
+      code = user_data.base_text,
+      source_buf = item.bufnr,
+   })
+   vim.bo[buf].modifiable = true
+   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+   vim.bo[buf].modifiable = false
+   vim.bo[buf].modified = false
+
+   if not ensure_follow_win(buf) then
+      return
+   end
+   render_follow_diagrams()
 end
 
 return Buffer
