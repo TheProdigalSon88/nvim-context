@@ -114,6 +114,34 @@ local function stack_save_top(win)
 end
 
 ---@param win integer
+---@param text string
+local function set_winbar(win, text)
+   if not vim.api.nvim_win_is_valid(win) then
+      return
+   end
+   vim.wo[win].winbar = text
+   local stack = stacks[win]
+   if stack and #stack > 0 then
+      stack[#stack].winbar = text
+   end
+end
+
+---@param opts ReferenceBuffer
+---@param stacked boolean
+---@return string
+local function editor_winbar(opts, stacked)
+   local parts = {}
+   if opts.on_move then
+      table.insert(parts, "m: move")
+   end
+   if opts.on_copy then
+      table.insert(parts, "c: copy")
+   end
+   table.insert(parts, stacked and "q: back" or "q: close")
+   return table.concat(parts, "    ")
+end
+
+---@param win integer
 ---@param frame ContextBufferFrame
 local function stack_show(win, frame)
    if not vim.api.nvim_win_is_valid(win) or not vim.api.nvim_buf_is_valid(frame.buf) then
@@ -250,9 +278,7 @@ function Buffer.open_reference_editor(opts, callback)
       on_show = opts.diagram_enabled and render_diagrams or nil,
    })
    local stacked = stacks[win] and #stacks[win] > 1
-   if stacked then
-      vim.wo[win].winbar = "q: back"
-   end
+   set_winbar(win, editor_winbar(opts, stacked))
    render_diagrams()
 
    local done = false
@@ -295,6 +321,22 @@ function Buffer.open_reference_editor(opts, callback)
       buffer = buf,
       desc = stacked and "Return to previous context buffer" or "Close note editor without saving",
    })
+
+   if opts.on_move then
+      vim.keymap.set("n", "m", function()
+         opts.on_move(function(success)
+            if success then
+               stack_pop(win)
+            end
+         end)
+      end, { buffer = buf, nowait = true, silent = true, desc = "Move reference to another loaded context" })
+   end
+
+   if opts.on_copy then
+      vim.keymap.set("n", "c", function()
+         opts.on_copy()
+      end, { buffer = buf, nowait = true, silent = true, desc = "Copy reference to another loaded context" })
+   end
 
    if opts.diagram_snippets and not opts.readonly then
       for keymap_str, diagram_type in pairs(opts.diagram_snippets) do
@@ -379,12 +421,25 @@ local SORT_LABELS = {
 }
 
 ---@param sort_mode string
+---@param opts? { on_activate?: function, on_move?: function, on_copy?: function }
 ---@return string
-local function sort_winbar(sort_mode)
-   return string.format(
-      "s: sort [%s]    a: activate    <CR>: note    q: close",
-      SORT_LABELS[sort_mode] or sort_mode
-   )
+local function viewer_winbar(sort_mode, opts)
+   opts = opts or {}
+   local parts = {
+      string.format("s: sort [%s]", SORT_LABELS[sort_mode] or sort_mode),
+   }
+   if opts.on_activate then
+      table.insert(parts, "a: activate")
+   end
+   if opts.on_move then
+      table.insert(parts, "m: move")
+   end
+   if opts.on_copy then
+      table.insert(parts, "c: copy")
+   end
+   table.insert(parts, "<CR>: note")
+   table.insert(parts, "q: close")
+   return table.concat(parts, "    ")
 end
 
 ---@param items ContextItem[]
@@ -474,14 +529,15 @@ end
 ---Opens a read-only split showing multiple references.
 ---Default sort is containment (innermost range at top); `s` toggles to
 ---timestamp latest-first. `a` activates the section's parent context without
----leaving the viewer. `<CR>` activates and stacks the reference editor in this
----window; `q` pops back (or closes when this is the last frame). Each item is
----rendered as its own section with a human-readable timestamp heading, an
+---leaving the viewer. `m` / `c` move or copy the section under the cursor to
+---another loaded context. `<CR>` activates and stacks the reference editor in
+---this window; `q` pops back (or closes when this is the last frame). Each item
+---is rendered as its own section with a human-readable timestamp heading, an
 ---optional description, and a fenced code block.
 ---@param items ContextItem[]
 ---@param source_buf? number   source buffer (used for filetype detection)
 ---@param on_select? fun(item: ContextItem)  called when <CR> is pressed anywhere in a section
----@param opts? { diagram_enabled?: boolean, diagram_render_keymap?: string, git_root?: string, on_activate?: fun(item: ContextItem) }
+---@param opts? { diagram_enabled?: boolean, diagram_render_keymap?: string, git_root?: string, on_activate?: fun(item: ContextItem), on_move?: fun(item: ContextItem, on_done?: fun(success: boolean)), on_copy?: fun(item: ContextItem, on_done?: fun(success: boolean)) }
 function Buffer.open_references_viewer(items, source_buf, on_select, opts)
    local sort_mode = "containment"
    table.sort(items, SORT_MODES[sort_mode])
@@ -499,7 +555,7 @@ function Buffer.open_references_viewer(items, source_buf, on_select, opts)
    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
    vim.bo[buf].modifiable = false
 
-    opts = opts or {}
+   opts = opts or {}
    local git_root = opts.git_root
    local focused_item = nil
    local rendered = false
@@ -584,13 +640,52 @@ function Buffer.open_references_viewer(items, source_buf, on_select, opts)
       preview_from_cursor()
    end
 
+   ---@param focused? ContextItem
+   local function redraw(focused)
+      if not vim.api.nvim_buf_is_valid(buf) then
+         return
+      end
+      if #items == 0 then
+         stack_pop(win)
+         return
+      end
+      local new_lines
+      new_lines, heading_lnums = render_reference_sections(items, lang)
+      vim.bo[buf].modifiable = true
+      vim.api.nvim_buf_set_lines(buf, 0, -1, false, new_lines)
+      vim.bo[buf].modifiable = false
+      set_winbar(win, viewer_winbar(sort_mode, opts))
+
+      local target_line = 1
+      if focused then
+         for i, item in ipairs(items) do
+            if item == focused then
+               target_line = heading_lnums[i]
+               break
+            end
+         end
+      end
+      if vim.api.nvim_win_is_valid(win) then
+         vim.api.nvim_win_set_cursor(win, { target_line, 0 })
+      end
+
+      if rendered then
+         local ok, diagram = pcall(require, "diagram")
+         if ok then
+            diagram.clear()
+            diagram.render()
+         end
+      end
+      refresh_diff()
+   end
+
    win = present_buffer(buf, {
       on_show = function()
          render_diagrams()
          refresh_diff()
       end,
    })
-   vim.wo[win].winbar = sort_winbar(sort_mode)
+   set_winbar(win, viewer_winbar(sort_mode, opts))
    if opts.diagram_enabled then
       rendered = true
       render_diagrams()
@@ -636,36 +731,7 @@ function Buffer.open_references_viewer(items, source_buf, on_select, opts)
       local focused = item_at_line(heading_lnums, items, cursor_line)
       sort_mode = sort_mode == "containment" and "timestamp" or "containment"
       table.sort(items, SORT_MODES[sort_mode])
-      local new_lines
-      new_lines, heading_lnums = render_reference_sections(items, lang)
-      vim.bo[buf].modifiable = true
-      vim.api.nvim_buf_set_lines(buf, 0, -1, false, new_lines)
-      vim.bo[buf].modifiable = false
-      if vim.api.nvim_win_is_valid(win) then
-         vim.wo[win].winbar = sort_winbar(sort_mode)
-      end
-
-      local target_line = 1
-      if focused then
-         for i, item in ipairs(items) do
-            if item == focused then
-               target_line = heading_lnums[i]
-               break
-            end
-         end
-      end
-      if vim.api.nvim_win_is_valid(win) then
-         vim.api.nvim_win_set_cursor(win, { target_line, 0 })
-      end
-
-      if rendered then
-         local ok, diagram = pcall(require, "diagram")
-         if ok then
-            diagram.clear()
-            diagram.render()
-         end
-      end
-      refresh_diff()
+      redraw(focused)
    end, { buffer = buf, desc = "Toggle sort (containment / timestamp)" })
 
    vim.keymap.set("n", "<CR>", function()
@@ -680,7 +746,7 @@ function Buffer.open_references_viewer(items, source_buf, on_select, opts)
             log.error("error selecting context: " .. tostring(err))
          end
       end
-    end, { buffer = buf, desc = "Load context and view note" })
+   end, { buffer = buf, desc = "Load context and view note" })
 
    if opts.on_activate then
       vim.keymap.set("n", "a", function()
@@ -693,6 +759,51 @@ function Buffer.open_references_viewer(items, source_buf, on_select, opts)
             end
          end
       end, { buffer = buf, desc = "Make section context active" })
+   end
+
+   ---@param selected ContextItem
+   local function remove_viewer_item(selected)
+      local next_focus
+      for i, item in ipairs(items) do
+         if item == selected then
+            next_focus = items[i + 1] or items[i - 1]
+            table.remove(items, i)
+            break
+         end
+      end
+      redraw(next_focus)
+   end
+
+   if opts.on_move then
+      vim.keymap.set("n", "m", function()
+         local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
+         local selected_item = item_at_line(heading_lnums, items, cursor_line)
+         if not selected_item then
+            return
+         end
+         local ok, err = pcall(opts.on_move, selected_item, function(success)
+            if success then
+               remove_viewer_item(selected_item)
+            end
+         end)
+         if not ok then
+            log.error("error moving reference: " .. tostring(err))
+         end
+      end, { buffer = buf, nowait = true, silent = true, desc = "Move reference to another loaded context" })
+   end
+
+   if opts.on_copy then
+      vim.keymap.set("n", "c", function()
+         local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
+         local selected_item = item_at_line(heading_lnums, items, cursor_line)
+         if not selected_item then
+            return
+         end
+         local ok, err = pcall(opts.on_copy, selected_item)
+         if not ok then
+            log.error("error copying reference: " .. tostring(err))
+         end
+      end, { buffer = buf, nowait = true, silent = true, desc = "Copy reference to another loaded context" })
    end
 end
 

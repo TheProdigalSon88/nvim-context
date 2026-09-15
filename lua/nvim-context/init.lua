@@ -8,6 +8,12 @@ local Context = {}
 Context.stack = {}
 ---@type integer|nil
 Context.active_idx = nil
+
+---@param item vim.quickfix.entry|ContextItem
+---@param op "move"|"copy"
+---@param on_done? fun(success: boolean)
+local transfer_reference
+
 ---@type ContextOptions
 local defaults = {
    trouble = false,
@@ -138,6 +144,13 @@ function Context.EditReference(idx)
       diagram_enabled = Context.Options.diagram.enabled,
       diagram_snippets = Context.Options.diagram.enabled and Context.Options.diagram.snippets or nil,
    }
+
+   referenceBuffer.on_move = function(on_done)
+      transfer_reference(item, "move", on_done)
+   end
+   referenceBuffer.on_copy = function(on_done)
+      transfer_reference(item, "copy", on_done)
+   end
 
    buffer.open_reference_editor(referenceBuffer, function(description)
       if description == nil then
@@ -472,6 +485,235 @@ end
 local function adopt_current_qf()
    table.insert(Context.stack, 1, qf_snapshot())
    Context.active_idx = 1
+end
+
+---@param item vim.quickfix.entry|ContextItem
+---@return vim.quickfix.entry|nil
+local function as_qf_item(item)
+   if type(item) ~= "table" then
+      return nil
+   end
+   if type(item.user_data) == "table" then
+      return item
+   end
+   if not Context.root then
+      Context.root = vim.fs.root(0, ".git")
+      if not Context.root then
+         log.error("not inside a git repository")
+         return nil
+      end
+   end
+   local converted = utils.dbrows_to_qfitems({ item }, Context.root)
+   return converted[1]
+end
+
+---@param qf_item vim.quickfix.entry
+---@param new_timestamp boolean
+---@return vim.quickfix.entry
+local function clone_qf_item(qf_item, new_timestamp)
+   local cloned = vim.deepcopy(qf_item)
+   local user_data = type(cloned.user_data) == "table" and vim.deepcopy(cloned.user_data) or {}
+   user_data.id = nil
+   if new_timestamp then
+      user_data.timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
+   end
+   cloned.user_data = user_data
+   return cloned
+end
+
+---@return number|string|nil
+local function active_list_id()
+   local ctx = vim.fn.getqflist({ context = 0 }).context
+   if type(ctx) == "table" and ctx.id ~= nil and ctx.id ~= "" then
+      return ctx.id
+   end
+end
+
+---@param entry LoadedContext
+---@return integer|nil
+local function find_stack_idx(entry)
+   local id = context_id(entry)
+   if id then
+      return find_stack_idx_by_id(id)
+   end
+   for i, stacked in ipairs(Context.stack) do
+      if stacked == entry then
+         return i
+      end
+   end
+   for i, stacked in ipairs(Context.stack) do
+      if stacked.title == entry.title then
+         return i
+      end
+   end
+end
+
+---@param item vim.quickfix.entry|ContextItem
+---@return integer|nil
+local function source_stack_idx(item)
+   local list_id = item.list_id
+   if list_id ~= nil and list_id ~= "" then
+      return find_stack_idx_by_id(list_id)
+   end
+   local id = active_list_id()
+   if id then
+      return find_stack_idx_by_id(id)
+   end
+   return Context.active_idx
+end
+
+---@param item vim.quickfix.entry|ContextItem
+---@return integer|nil
+local function ensure_source_stacked(item)
+   local idx = source_stack_idx(item)
+   if idx then
+      return idx
+   end
+   local list_id = item.list_id
+   if list_id == nil or list_id == "" or not Context.root then
+      return nil
+   end
+   local load_ok, data = pcall(sql.load_list, Context.root, list_id)
+   if not load_ok or not data then
+      return nil
+   end
+   table.insert(Context.stack, {
+      title = data.title,
+      items = utils.dbrows_to_qfitems(data.items, Context.root),
+      context = { description = data.description, id = data.id },
+   })
+   return #Context.stack
+end
+
+---@param items vim.quickfix.entry[]
+---@param qf_item vim.quickfix.entry
+---@return boolean
+local function remove_qf_item(items, qf_item)
+   local idx = utils.find_qf_index(items, qf_item)
+   if not idx then
+      return false
+   end
+   table.remove(items, idx)
+   return true
+end
+
+---@param exclude_idx integer|nil
+---@param prompt string
+---@param on_choice fun(idx?: integer)
+---@return boolean
+local function pick_target_context(exclude_idx, prompt, on_choice)
+   if not Context.stack or #Context.stack == 0 then
+      log.info("no loaded contexts")
+      return false
+   end
+   ---@type { idx: integer, entry: LoadedContext }[]
+   local choices = {}
+   for i, entry in ipairs(Context.stack) do
+      if i ~= exclude_idx then
+         table.insert(choices, { idx = i, entry = entry })
+      end
+   end
+   if #choices == 0 then
+      log.info("no other loaded contexts")
+      return false
+   end
+   vim.ui.select(choices, {
+      prompt = prompt,
+      format_item = function(item)
+         local prefix = item.idx == Context.active_idx and "* " or "  "
+         return prefix .. (item.entry.title or "")
+      end,
+   }, function(choice)
+      if not choice then
+         on_choice(nil)
+         return
+      end
+      snapshot_active()
+      local idx = find_stack_idx(choice.entry)
+      if not idx then
+         log.error("target context is no longer loaded")
+         on_choice(nil)
+         return
+      end
+      on_choice(idx)
+   end)
+   return true
+end
+
+---@param item vim.quickfix.entry|ContextItem
+---@param op "move"|"copy"
+---@param on_done? fun(success: boolean)
+transfer_reference = function(item, op, on_done)
+   local qf_item = as_qf_item(item)
+   if not qf_item then
+      log.error("no context reference to " .. op)
+      if on_done then
+         on_done(false)
+      end
+      return
+   end
+
+   local exclude_idx = source_stack_idx(item)
+   local prompt = op == "move" and "Move reference to:" or "Copy reference to:"
+   local opened = pick_target_context(exclude_idx, prompt, function(target_idx)
+      if not target_idx then
+         if on_done then
+            on_done(false)
+         end
+         return
+      end
+
+      local cloned = clone_qf_item(qf_item, op == "copy")
+      local target = Context.stack[target_idx]
+      target.items = target.items or {}
+      table.insert(target.items, cloned)
+
+      local src_idx
+      local removed = false
+      if op == "move" then
+         src_idx = ensure_source_stacked(item)
+         if src_idx and src_idx ~= target_idx then
+            removed = remove_qf_item(Context.stack[src_idx].items or {}, qf_item)
+         elseif not src_idx then
+            local qflist = vim.fn.getqflist()
+            if remove_qf_item(qflist, qf_item) then
+               vim.fn.setqflist({}, "r", { items = qflist })
+               if Context.Options and Context.Options.trouble then
+                  require("trouble").refresh("qflist")
+               end
+               removed = true
+            end
+         end
+      end
+
+      local active = Context.active_idx
+      if active and (target_idx == active or src_idx == active) then
+         apply_loaded(Context.stack[active], "r")
+      end
+
+      local title = target.title or ""
+      if op == "copy" then
+         log.info("copied reference to " .. title)
+         if on_done then
+            on_done(true)
+         end
+         return
+      end
+      if removed then
+         log.info("moved reference to " .. title)
+         if on_done then
+            on_done(true)
+         end
+         return
+      end
+      log.info("copied reference to " .. title .. " (could not remove from source)")
+      if on_done then
+         on_done(false)
+      end
+   end)
+   if not opened and on_done then
+      on_done(false)
+   end
 end
 
 function Context.LoadContext()
@@ -833,12 +1075,24 @@ function Context.ShowReference(line1, line2)
          readonly = true,
          diagram_keymap = nil,
          diagram_enabled = Context.Options.diagram.enabled,
+         on_move = function(on_done)
+            transfer_reference(item, "move", on_done)
+         end,
+         on_copy = function(on_done)
+            transfer_reference(item, "copy", on_done)
+         end,
       }, function() end)
    end, {
       diagram_enabled = Context.Options.diagram.enabled,
       git_root = Context.root,
       on_activate = function(item)
          activate_or_push(item.list_id)
+      end,
+      on_move = function(item, on_done)
+         transfer_reference(item, "move", on_done)
+      end,
+      on_copy = function(item, on_done)
+         transfer_reference(item, "copy", on_done)
       end,
    })
 end
@@ -924,6 +1178,33 @@ function Context.DeleteReference(line1)
       return
    end
    delete_qf_index(line1 or vim.fn.line("."))
+end
+
+---@param idx? number
+---@param op "move"|"copy"
+local function transfer_qf_reference(idx, op)
+   local name = op == "move" and "MoveReference" or "CopyReference"
+   if idx == nil and vim.bo.filetype ~= "qf" then
+      log.error(name .. " must be run from the quickfix list")
+      return
+   end
+   local qflist = vim.fn.getqflist()
+   local item = qflist[idx or vim.fn.line(".")]
+   if not item then
+      log.error("no context reference under cursor")
+      return
+   end
+   transfer_reference(item, op)
+end
+
+---@param idx? number
+function Context.MoveReference(idx)
+   transfer_qf_reference(idx, "move")
+end
+
+---@param idx? number
+function Context.CopyReference(idx)
+   transfer_qf_reference(idx, "copy")
 end
 
 function Context.ToggleQfDiff()

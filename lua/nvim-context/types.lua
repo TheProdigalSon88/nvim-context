@@ -77,3 +77,5 @@
 ---@field diagram_keymap? string               keymap to insert a bare mermaid fenced block, e.g. "<leader>m"; nil disables
 ---@field diagram_enabled? boolean             auto-render diagrams on open when true
 ---@field diagram_snippets? table<string,string>  map of keymap string -> diagram type for typed snippet insertion
+---@field on_move? fun(on_done?: fun(success: boolean))  move this item to another loaded context
+---@field on_copy? fun(on_done?: fun(success: boolean))  copy this item to another loaded context
