@@ -7,6 +7,11 @@
 ---@field items vim.quickfix.entry[]
 ---@field context table|nil
 
+--- MRU stack entry. Current context is always index 1.
+---@class ContextStackItem
+---@field id? number|string
+---@field title string
+
 ---@class ContextList
 ---@field id? number
 ---@field title? string

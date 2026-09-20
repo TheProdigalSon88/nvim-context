@@ -4,10 +4,8 @@ local buffer = require("nvim-context.buffer")
 local log = require("nvim-context.log")
 
 local Context = {}
----@type LoadedContext[]
+---@type ContextStackItem[]
 Context.stack = {}
----@type integer|nil
-Context.active_idx = nil
 
 ---@param item vim.quickfix.entry|ContextItem
 ---@param op "move"|"copy"
@@ -369,21 +367,44 @@ function Context.EditReferenceLines(idx)
    edit_reference_lines(idx or vim.fn.line("."))
 end
 
----@return LoadedContext
-local function qf_snapshot()
-   local info = vim.fn.getqflist({ title = 0, items = 0, context = 0 })
+---@param data ContextList|table
+---@return table
+local function qf_context_from_list(data)
    return {
-      title = info.title or "",
-      items = info.items or {},
-      context = info.context,
+      description = data.description,
+      id = data.id,
    }
 end
 
-local function snapshot_active()
-   if not Context.active_idx then
-      return
+---@param data ContextList
+---@return LoadedContext
+local function loaded_from_list(data)
+   return {
+      title = data.title or "",
+      items = utils.dbrows_to_qfitems(data.items, Context.root),
+      context = qf_context_from_list(data),
+   }
+end
+
+---@param id number|string
+---@return LoadedContext|nil, any
+local function load_as_loaded(id)
+   local ok, data = pcall(sql.load_list, Context.root, id)
+   if not ok or not data then
+      return nil, data
    end
-   Context.stack[Context.active_idx] = qf_snapshot()
+   return loaded_from_list(data)
+end
+
+---@param loaded LoadedContext
+---@return ContextStackItem
+local function stack_item_from_loaded(loaded)
+   local ctx = type(loaded.context) == "table" and loaded.context or {}
+   local id = ctx.id
+   if id == "" then
+      id = nil
+   end
+   return { id = id, title = loaded.title or "" }
 end
 
 ---@param entry LoadedContext
@@ -399,17 +420,12 @@ local function apply_loaded(entry, action)
    end
 end
 
----@param entry LoadedContext
 ---@return number|string|nil
-local function context_id(entry)
-   if type(entry.context) ~= "table" then
-      return nil
+local function qf_list_id()
+   local ctx = vim.fn.getqflist({ context = 0 }).context
+   if type(ctx) == "table" and ctx.id ~= nil and ctx.id ~= "" then
+      return ctx.id
    end
-   local id = entry.context.id
-   if id == nil or id == "" then
-      return nil
-   end
-   return id
 end
 
 ---@param id number|string|nil
@@ -419,7 +435,7 @@ local function find_stack_idx_by_id(id)
       return nil
    end
    for i, entry in ipairs(Context.stack) do
-      if context_id(entry) == id then
+      if entry.id == id then
          return i
       end
    end
@@ -434,57 +450,197 @@ local function move_to_top(idx)
    table.insert(Context.stack, 1, entry)
 end
 
+---@param entry ContextStackItem
+---@return boolean
+local function showing_stack_entry(entry)
+   local info = vim.fn.getqflist({ context = 0, title = 0 })
+   local ctx = type(info.context) == "table" and info.context or {}
+   if entry.id then
+      return ctx.id == entry.id
+   end
+   return (ctx.id == nil or ctx.id == "") and (info.title or "") == entry.title
+end
+
+---@param item vim.quickfix.entry
+---@return table
+local function item_fingerprint(item)
+   local ud = type(item.user_data) == "table" and item.user_data or {}
+   local lnum, end_lnum = utils.qf_range(item)
+   return {
+      path = utils.normalize_qf_path(item, Context.root) or item.filename or "",
+      lnum = lnum,
+      end_lnum = end_lnum,
+      description = ud.description or "",
+      base_text = ud.base_text or "",
+      display_text = ud.display_text or "",
+   }
+end
+
+---@param a vim.quickfix.entry[]
+---@param b vim.quickfix.entry[]
+---@return boolean
+local function qf_items_match(a, b)
+   if #a ~= #b then
+      return false
+   end
+   for i = 1, #a do
+      if not vim.deep_equal(item_fingerprint(a[i]), item_fingerprint(b[i])) then
+         return false
+      end
+   end
+   return true
+end
+
+--- Live qflist differs from the last saved DB row (or an unsaved list has content).
+--- Item ids are ignored (they are not stamped onto the qflist until reload, so a
+--- post-save list would otherwise always look dirty).
+---@return boolean
+local function current_is_dirty()
+   local info = vim.fn.getqflist({ title = 0, items = 0, context = 0 })
+   local ctx = type(info.context) == "table" and info.context or {}
+   local items = info.items or {}
+   local id = ctx.id
+   if id == nil or id == "" then
+      if #items > 0 then
+         return true
+      end
+      if (ctx.description or "") ~= "" then
+         return true
+      end
+      return false
+   end
+   if not Context.root then
+      return #items > 0
+   end
+   local loaded = load_as_loaded(id)
+   if not loaded then
+      return true
+   end
+   if (info.title or "") ~= (loaded.title or "") then
+      return true
+   end
+   local lctx = type(loaded.context) == "table" and loaded.context or {}
+   if (ctx.description or "") ~= (lctx.description or "") then
+      return true
+   end
+   return not qf_items_match(items, loaded.items or {})
+end
+
+---@param proceed fun()
+local function confirm_leave_current(proceed)
+   if not current_is_dirty() then
+      proceed()
+      return
+   end
+   local title = vim.fn.getqflist({ title = 0 }).title
+   if title == nil or title == "" then
+      title = "untitled"
+   end
+   vim.ui.select({ "Save", "Discard", "Cancel" }, {
+      prompt = string.format("Context '%s' has unsaved changes. Save before switching?", title),
+   }, function(choice)
+      if choice == "Save" then
+         if Context.SaveContext() then
+            proceed()
+         end
+      elseif choice == "Discard" then
+         proceed()
+      end
+   end)
+end
+
 ---@param idx integer
 ---@param action string
 local function activate_idx(idx, action)
-   if idx == 1 and Context.active_idx == 1 then
+   local entry = Context.stack[idx]
+   if not entry then
       return
    end
-   snapshot_active()
+   if idx == 1 and showing_stack_entry(entry) then
+      return
+   end
    move_to_top(idx)
-   Context.active_idx = 1
-   apply_loaded(Context.stack[1], action)
+   entry = Context.stack[1]
+   if entry.id then
+      local loaded, err = load_as_loaded(entry.id)
+      if not loaded then
+         log.error("failed to load context: " .. tostring(err))
+         return
+      end
+      entry.title = loaded.title
+      apply_loaded(loaded, action)
+      return
+   end
+   apply_loaded({
+      title = entry.title,
+      items = {},
+      context = {},
+   }, action)
 end
 
 ---@param entry LoadedContext
 ---@param action string
 local function push_loaded(entry, action)
-   snapshot_active()
-   table.insert(Context.stack, 1, entry)
-   Context.active_idx = 1
+   table.insert(Context.stack, 1, stack_item_from_loaded(entry))
    apply_loaded(entry, action)
 end
 
 ---@param list_id number|string|nil
+---@param after? fun(ok: boolean)
 ---@return boolean
-local function activate_or_push(list_id)
+local function activate_or_push(list_id, after)
    if list_id == nil or list_id == "" then
       log.error("reference has no parent context")
+      if after then
+         after(false)
+      end
       return false
    end
    local stacked_idx = find_stack_idx_by_id(list_id)
    if stacked_idx then
-      activate_idx(stacked_idx, "r")
-      log.info("loaded context: " .. Context.stack[1].title)
+      local entry = Context.stack[stacked_idx]
+      if stacked_idx == 1 and showing_stack_entry(entry) then
+         log.info("loaded context: " .. entry.title)
+         if after then
+            after(true)
+         end
+         return true
+      end
+      confirm_leave_current(function()
+         activate_idx(stacked_idx, "r")
+         log.info("loaded context: " .. Context.stack[1].title)
+         if after then
+            after(true)
+         end
+      end)
       return true
    end
-   local load_ok, data = pcall(sql.load_list, Context.root, list_id)
-   if not load_ok or not data then
-      log.error("failed to load context: " .. tostring(data))
-      return false
-   end
-   push_loaded({
-      title = data.title,
-      items = utils.dbrows_to_qfitems(data.items, Context.root),
-      context = { description = data.description, id = data.id },
-   }, " ")
-   log.info("loaded context: " .. data.title)
+   confirm_leave_current(function()
+      local loaded, err = load_as_loaded(list_id)
+      if not loaded then
+         log.error("failed to load context: " .. tostring(err))
+         if after then
+            after(false)
+         end
+         return
+      end
+      push_loaded(loaded, " ")
+      log.info("loaded context: " .. loaded.title)
+      if after then
+         after(true)
+      end
+   end)
    return true
 end
 
 local function adopt_current_qf()
-   table.insert(Context.stack, 1, qf_snapshot())
-   Context.active_idx = 1
+   local info = vim.fn.getqflist({ title = 0, context = 0 })
+   local ctx = type(info.context) == "table" and info.context or {}
+   local id = ctx.id
+   if id == "" then
+      id = nil
+   end
+   table.insert(Context.stack, 1, { id = id, title = info.title or "" })
 end
 
 ---@param item vim.quickfix.entry|ContextItem
@@ -521,20 +677,14 @@ local function clone_qf_item(qf_item, new_timestamp)
    return cloned
 end
 
----@return number|string|nil
-local function active_list_id()
-   local ctx = vim.fn.getqflist({ context = 0 }).context
-   if type(ctx) == "table" and ctx.id ~= nil and ctx.id ~= "" then
-      return ctx.id
-   end
-end
-
----@param entry LoadedContext
+---@param entry ContextStackItem
 ---@return integer|nil
 local function find_stack_idx(entry)
-   local id = context_id(entry)
-   if id then
-      return find_stack_idx_by_id(id)
+   if entry.id ~= nil and entry.id ~= "" then
+      local idx = find_stack_idx_by_id(entry.id)
+      if idx then
+         return idx
+      end
    end
    for i, stacked in ipairs(Context.stack) do
       if stacked == entry then
@@ -549,40 +699,24 @@ local function find_stack_idx(entry)
 end
 
 ---@param item vim.quickfix.entry|ContextItem
----@return integer|nil
-local function source_stack_idx(item)
-   local list_id = item.list_id
-   if list_id ~= nil and list_id ~= "" then
-      return find_stack_idx_by_id(list_id)
+---@return number|string|nil
+local function source_list_id(item)
+   if item.list_id ~= nil and item.list_id ~= "" then
+      return item.list_id
    end
-   local id = active_list_id()
-   if id then
-      return find_stack_idx_by_id(id)
-   end
-   return Context.active_idx
+   return qf_list_id()
 end
 
 ---@param item vim.quickfix.entry|ContextItem
 ---@return integer|nil
-local function ensure_source_stacked(item)
-   local idx = source_stack_idx(item)
+local function source_stack_idx(item)
+   local idx = find_stack_idx_by_id(source_list_id(item))
    if idx then
       return idx
    end
-   local list_id = item.list_id
-   if list_id == nil or list_id == "" or not Context.root then
-      return nil
+   if #Context.stack > 0 then
+      return 1
    end
-   local load_ok, data = pcall(sql.load_list, Context.root, list_id)
-   if not load_ok or not data then
-      return nil
-   end
-   table.insert(Context.stack, {
-      title = data.title,
-      items = utils.dbrows_to_qfitems(data.items, Context.root),
-      context = { description = data.description, id = data.id },
-   })
-   return #Context.stack
 end
 
 ---@param items vim.quickfix.entry[]
@@ -597,6 +731,94 @@ local function remove_qf_item(items, qf_item)
    return true
 end
 
+---@param items vim.quickfix.entry[]
+local function replace_qf_items(items)
+   vim.fn.setqflist({}, "r", { items = items })
+   if Context.Options and Context.Options.trouble then
+      require("trouble").refresh("qflist")
+   end
+end
+
+---@param list_id number|string
+---@param items vim.quickfix.entry[]
+---@return boolean, any
+local function persist_items(list_id, items)
+   local ok, previous = pcall(sql.load_list, Context.root, list_id)
+   if not ok or not previous then
+      return false, previous
+   end
+   local info = {
+      title = previous.title,
+      items = items,
+      context = qf_context_from_list(previous),
+   }
+    local conv_ok, new, context = pcall(utils.qflist_to_context, info, previous)
+    if not conv_ok then
+       return false, new
+    end
+   local new_items, updated_items = utils.qfitems_to_dbrows(items, previous.items, Context.root)
+   local deleted_ids = utils.deleted_item_ids(items, previous.items)
+   local upd_ok, err = pcall(
+      sql.update_context,
+      Context.root,
+      context,
+      new_items,
+      updated_items,
+      previous.title,
+      deleted_ids
+   )
+   if not upd_ok then
+      return false, err
+   end
+   return true
+end
+
+---@param cloned vim.quickfix.entry
+local function append_to_current(cloned)
+   local qflist = vim.fn.getqflist()
+   table.insert(qflist, cloned)
+   replace_qf_items(qflist)
+   return true
+end
+
+---@param qf_item vim.quickfix.entry
+---@return boolean
+local function remove_from_current(qf_item)
+   local qflist = vim.fn.getqflist()
+   if remove_qf_item(qflist, qf_item) then
+      replace_qf_items(qflist)
+      return true
+   end
+   return false
+end
+
+---@param list_id number|string
+---@param cloned vim.quickfix.entry
+---@return boolean, any
+local function append_to_saved(list_id, cloned)
+   local loaded, err = load_as_loaded(list_id)
+   if not loaded then
+      return false, err
+   end
+   loaded.items = loaded.items or {}
+   table.insert(loaded.items, cloned)
+   return persist_items(list_id, loaded.items)
+end
+
+---@param list_id number|string
+---@param qf_item vim.quickfix.entry
+---@return boolean, any
+local function remove_from_saved(list_id, qf_item)
+   local loaded, err = load_as_loaded(list_id)
+   if not loaded then
+      return false, err
+   end
+   if not remove_qf_item(loaded.items or {}, qf_item) then
+      return false
+   end
+   return persist_items(list_id, loaded.items)
+end
+
 ---@param exclude_idx integer|nil
 ---@param prompt string
 ---@param on_choice fun(idx?: integer)
@@ -606,7 +828,7 @@ local function pick_target_context(exclude_idx, prompt, on_choice)
       log.info("no loaded contexts")
       return false
    end
-   ---@type { idx: integer, entry: LoadedContext }[]
+   ---@type { idx: integer, entry: ContextStackItem }[]
    local choices = {}
    for i, entry in ipairs(Context.stack) do
       if i ~= exclude_idx then
@@ -617,26 +839,25 @@ local function pick_target_context(exclude_idx, prompt, on_choice)
       log.info("no other loaded contexts")
       return false
    end
-   vim.ui.select(choices, {
-      prompt = prompt,
-      format_item = function(item)
-         local prefix = item.idx == Context.active_idx and "* " or "  "
-         return prefix .. (item.entry.title or "")
-      end,
-   }, function(choice)
-      if not choice then
-         on_choice(nil)
-         return
-      end
-      snapshot_active()
-      local idx = find_stack_idx(choice.entry)
-      if not idx then
-         log.error("target context is no longer loaded")
-         on_choice(nil)
-         return
-      end
-      on_choice(idx)
-   end)
+    vim.ui.select(choices, {
+       prompt = prompt,
+       format_item = function(item)
+          local prefix = item.idx == 1 and "* " or "  "
+          return prefix .. (item.entry.title or "")
+       end,
+    }, function(choice)
+       if not choice then
+          on_choice(nil)
+          return
+       end
+       local idx = find_stack_idx(choice.entry)
+       if not idx then
+          log.error("target context is no longer loaded")
+          on_choice(nil)
+          return
+       end
+       on_choice(idx)
+    end)
    return true
 end
 
@@ -665,39 +886,42 @@ transfer_reference = function(item, op, on_done)
 
       local cloned = clone_qf_item(qf_item, op == "copy")
       local target = Context.stack[target_idx]
-      target.items = target.items or {}
-      table.insert(target.items, cloned)
-
-      local src_idx
-      local removed = false
-      if op == "move" then
-         src_idx = ensure_source_stacked(item)
-         if src_idx and src_idx ~= target_idx then
-            removed = remove_qf_item(Context.stack[src_idx].items or {}, qf_item)
-         elseif not src_idx then
-            local qflist = vim.fn.getqflist()
-            if remove_qf_item(qflist, qf_item) then
-               vim.fn.setqflist({}, "r", { items = qflist })
-               if Context.Options and Context.Options.trouble then
-                  require("trouble").refresh("qflist")
-               end
-               removed = true
-            end
-         end
-      end
-
-      local active = Context.active_idx
-      if active and (target_idx == active or src_idx == active) then
-         apply_loaded(Context.stack[active], "r")
-      end
-
       local title = target.title or ""
+      local added, add_err
+      if target_idx == 1 then
+         added = append_to_current(cloned)
+      elseif not target.id then
+         log.error("save the target context before copying into it")
+         if on_done then
+            on_done(false)
+         end
+         return
+      else
+         added, add_err = append_to_saved(target.id, cloned)
+      end
+      if not added then
+         log.error("failed to " .. op .. " reference: " .. tostring(add_err))
+         if on_done then
+            on_done(false)
+         end
+         return
+      end
+
       if op == "copy" then
          log.info("copied reference to " .. title)
          if on_done then
             on_done(true)
          end
          return
+      end
+
+      local src_idx = source_stack_idx(item)
+      local src_id = source_list_id(item)
+      local removed = false
+      if src_idx == 1 or not src_id then
+         removed = remove_from_current(qf_item)
+      else
+         removed = remove_from_saved(src_id, qf_item)
       end
       if removed then
          log.info("moved reference to " .. title)
@@ -748,37 +972,44 @@ function Context.LoadContext()
       end
 
       if choice.title == new_context.title then
-         vim.ui.input({ prompt = "New context title: " }, function(title)
-            if title == nil or title == "" then
-               log.error("context must have title")
-               return
-            end
-            push_loaded({ title = title, items = {}, context = {} }, " ")
-            log.info("created context " .. title)
+         confirm_leave_current(function()
+            vim.ui.input({ prompt = "New context title: " }, function(title)
+               if title == nil or title == "" then
+                  log.error("context must have title")
+                  return
+               end
+               push_loaded({ title = title, items = {}, context = {} }, " ")
+               log.info("created context " .. title)
+            end)
          end)
          return
       end
 
       local stacked_idx = find_stack_idx_by_id(choice.id)
       if stacked_idx then
-         activate_idx(stacked_idx, "r")
-         log.info("loaded context: " .. choice.title)
+         if stacked_idx == 1 and showing_stack_entry(Context.stack[1]) then
+            log.info("loaded context: " .. choice.title)
+            return
+         end
+         confirm_leave_current(function()
+            activate_idx(stacked_idx, "r")
+            log.info("loaded context: " .. choice.title)
+         end)
          return
       end
 
-      local load_ok, data = pcall(sql.load_list, Context.root, choice.id)
-      if not load_ok or not data then
-         log.error("failed to load context" .. tostring(data))
-         return
-      end
-      ---@type LoadedContext
-      local selectedContext = {
-         title = data.title ~= "" and data.title or choice.title,
-         items = utils.dbrows_to_qfitems(data.items, Context.root),
-         context = { description = data.description, id = data.id },
-      }
-      push_loaded(selectedContext, " ")
-      log.info("loaded context: " .. choice.title)
+      confirm_leave_current(function()
+         local loaded, err = load_as_loaded(choice.id)
+         if not loaded then
+            log.error("failed to load context" .. tostring(err))
+            return
+         end
+         if loaded.title == "" then
+            loaded.title = choice.title
+         end
+         push_loaded(loaded, " ")
+         log.info("loaded context: " .. choice.title)
+      end)
     end)
 end
 
@@ -825,23 +1056,18 @@ function Context.DeleteContext()
             return
          end
 
-         local stacked_idx = find_stack_idx_by_id(choice.id)
-         if stacked_idx then
-            local was_active = stacked_idx == Context.active_idx
-            table.remove(Context.stack, stacked_idx)
-            if was_active then
-               if #Context.stack > 0 then
-                  Context.active_idx = 1
-                  apply_loaded(Context.stack[1], "r")
-               else
-                  Context.active_idx = nil
-                  vim.fn.setqflist({}, "r", { title = "", items = {}, context = {} })
-                  if Context.Options and Context.Options.trouble then
-                     require("trouble").refresh("qflist")
-                  end
-               end
-            end
-         end
+          local stacked_idx = find_stack_idx_by_id(choice.id)
+          if stacked_idx then
+             local was_current = stacked_idx == 1
+             table.remove(Context.stack, stacked_idx)
+             if was_current then
+                if #Context.stack > 0 then
+                   activate_idx(1, "r")
+                else
+                   apply_loaded({ title = "", items = {}, context = {} }, "r")
+                end
+             end
+          end
 
          log.info("deleted context: " .. choice.title)
       end)
@@ -864,41 +1090,50 @@ function Context.PickContext()
                break
             end
          end
-         local prefix = idx == Context.active_idx and "* " or "  "
-         return prefix .. (item.title or "")
-      end,
-   }, function(choice)
-      if not choice then
-         return
-      end
-      local idx
-      for i, entry in ipairs(Context.stack) do
-         if entry == choice then
-            idx = i
-            break
-         end
-      end
-      if not idx then
-         return
-      end
-      activate_idx(idx, "r")
-      log.info("switched to context: " .. choice.title)
-   end)
+          local prefix = idx == 1 and "* " or "  "
+          return prefix .. (item.title or "")
+       end,
+    }, function(choice)
+       if not choice then
+          return
+       end
+       local idx
+       for i, entry in ipairs(Context.stack) do
+          if entry == choice then
+             idx = i
+             break
+          end
+       end
+       if not idx then
+          return
+       end
+       if idx == 1 and showing_stack_entry(Context.stack[1]) then
+          log.info("switched to context: " .. choice.title)
+          return
+       end
+       confirm_leave_current(function()
+          activate_idx(idx, "r")
+          log.info("switched to context: " .. choice.title)
+       end)
+    end)
 end
 
 function Context.AddEditContextTitle()
    Context.current_title = vim.fn.getqflist({ title = 0 }).title or ""
 
    vim.ui.input({ prompt = "Quickfix title: ", default = Context.current_title }, function(title)
-      if title == nil or title == "" then
-         log.error("context must have title")
-         return
-      end
-      vim.fn.setqflist({}, "r", { title = title })
-      if Context.Options.trouble then
-         require("trouble").refresh("qflist")
-      end
-      log.info("added/updated context title")
+       if title == nil or title == "" then
+          log.error("context must have title")
+          return
+       end
+       vim.fn.setqflist({}, "r", { title = title })
+       if Context.stack[1] then
+          Context.stack[1].title = title
+       end
+       if Context.Options.trouble then
+          require("trouble").refresh("qflist")
+       end
+       log.info("added/updated context title")
    end)
 end
 
@@ -924,21 +1159,22 @@ function Context.AddEditContextDescription()
          require("trouble").refresh("qflist")
       end
       log.info("added/updated context description")
-   end)
+    end)
 end
 
+---@return boolean
 function Context.SaveContext()
    local title = vim.fn.getqflist({ title = 0 }).title
    if title == "" or title == nil then
       log.error("set a title for context before saving")
-      return
+      return false
    end
 
    if not Context.root then
       Context.root = vim.fs.root(0, ".git")
       if not Context.root then
          log.error("not inside a git repository")
-         return
+         return false
       end
    end
 
@@ -958,7 +1194,7 @@ function Context.SaveContext()
    local conv_ok, new, context = pcall(utils.qflist_to_context, info, previous_context)
    if not conv_ok then
       log.error("failed to build context: " .. tostring(context))
-      return
+      return false
    end
 
    ---@type ContextItem, UpdateContextItem
@@ -970,12 +1206,19 @@ function Context.SaveContext()
       local ok, new_id = pcall(sql.insert_context, Context.root, context, new_items)
       if not ok then
          log.error("failed to save context: " .. tostring(new_id))
-         return
+         return false
       end
       local saved_ctx = type(info.context) == "table" and vim.deepcopy(info.context) or {}
       saved_ctx.id = new_id
       vim.fn.setqflist({}, "r", { context = saved_ctx })
+      if Context.stack[1] then
+         Context.stack[1].id = new_id
+         Context.stack[1].title = title
+      else
+         table.insert(Context.stack, 1, { id = new_id, title = title })
+      end
       log.info("saved context: " .. title)
+      return true
    elseif previous_ok then
       local ok, err = pcall(
          sql.update_context,
@@ -988,11 +1231,17 @@ function Context.SaveContext()
       )
       if not ok then
          log.error("failed to update context: " .. tostring(err))
-         return
+         return false
+      end
+      if Context.stack[1] then
+         Context.stack[1].id = db_id
+         Context.stack[1].title = title
       end
       log.info("updated context: " .. title)
+      return true
    else
       log.error("failed to load previous context: " .. tostring(previous_context))
+      return false
    end
 end
 
@@ -1026,9 +1275,11 @@ function Context.ConvertQFlist()
       if Context.Options.trouble then
          require("trouble").refresh("qflist")
       end
-      if not Context.active_idx then
-         adopt_current_qf()
-      end
+       if #Context.stack == 0 then
+          adopt_current_qf()
+       elseif Context.stack[1] then
+          Context.stack[1].title = title
+       end
       local msg = "converted " .. #converted .. " quickfix entries"
       if skipped > 0 then
          msg = msg .. " (" .. skipped .. " skipped)"
@@ -1064,25 +1315,27 @@ function Context.ShowReference(line1, line2)
       return
    end
 
-   buffer.open_references_viewer(items, bufnr, function(item)
-      if not activate_or_push(item.list_id) then
-         return
-      end
-      buffer.open_reference_editor({
-         default = item.description,
-         code = item.base_text,
-         source_buf = bufnr,
-         readonly = true,
-         diagram_keymap = nil,
-         diagram_enabled = Context.Options.diagram.enabled,
-         on_move = function(on_done)
-            transfer_reference(item, "move", on_done)
-         end,
-         on_copy = function(on_done)
-            transfer_reference(item, "copy", on_done)
-         end,
-      }, function() end)
-   end, {
+    buffer.open_references_viewer(items, bufnr, function(item)
+       activate_or_push(item.list_id, function(ok)
+          if not ok then
+             return
+          end
+          buffer.open_reference_editor({
+             default = item.description,
+             code = item.base_text,
+             source_buf = bufnr,
+             readonly = true,
+             diagram_keymap = nil,
+             diagram_enabled = Context.Options.diagram.enabled,
+             on_move = function(on_done)
+                transfer_reference(item, "move", on_done)
+             end,
+             on_copy = function(on_done)
+                transfer_reference(item, "copy", on_done)
+             end,
+          }, function() end)
+       end)
+    end, {
       diagram_enabled = Context.Options.diagram.enabled,
       git_root = Context.root,
       on_activate = function(item)
