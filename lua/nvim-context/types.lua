@@ -8,14 +8,37 @@
 ---@field context table|nil
 
 --- MRU stack entry. Current context is always index 1.
+---@alias ContextStackType
+---| "flow"
+---| "structure"
+---| "context"
+
 ---@class ContextStackItem
 ---@field id? number|string
 ---@field title string
 
+---@class ContextFlow
+---@field title string
+---@field items ContextStructureItem[]
+---@field description string
+
+--- Pair: item id plus related item ids.
+---@class ContextStructureItem
+---@field [1] number
+---@field [2] number[]
+
+---@class ContextStructure
+---@field title string
+---@field description string
+---@field items ContextStructureItem[]
+
 ---@class ContextList
 ---@field id? number
+---@field type ContextStackType
 ---@field title? string
 ---@field description? string
+---@field flows? ContextFlow[]
+---@field structures? ContextStructure[]
 ---@field items? ContextItem[]
 ---@field git_hash? string
 ---@field timestamp string|osdate

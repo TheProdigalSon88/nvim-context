@@ -37,6 +37,11 @@ local function get_db(root)
       root = { type = "text", required = true },
       title = { type = "text", required = true },
       description = "text",
+      -- ContextStackType: "context" | "flow" | "structure". Default "context".
+      type = "text",
+      -- json: array of item-id arrays, e.g. {{1, 2}, {3}}. Optional; NULL when unset.
+      flows = "json",
+      structures = "json",
     },
     items = {
       id = { type = "integer", primary = true },
@@ -63,6 +68,23 @@ local function get_db(root)
   pcall(function()
     d:eval("CREATE INDEX IF NOT EXISTS idx_items_file_lnum ON items(filename, lnum, end_lnum)")
   end)
+
+  -- sqlite.lua auto-alter cannot add columns; existing DBs need a raw ADD COLUMN.
+  -- Fails harmlessly when the column already exists (new DBs created from schema).
+  pcall(function()
+    d:eval("ALTER TABLE lists ADD COLUMN flows json")
+  end)
+
+  -- sqlite.lua auto-alter cannot add columns; existing DBs need a raw ADD COLUMN.
+  -- Fails harmlessly when the column already exists (new DBs created from schema).
+  pcall(function()
+    d:eval("ALTER TABLE lists ADD COLUMN structures json")
+  end)
+
+  pcall(function()
+    d:eval("ALTER TABLE lists ADD COLUMN type text")
+  end)
+
 
   db_cache[root] = d
   return d
@@ -174,6 +196,9 @@ function M.insert_context(root, data, items)
     root = root,
     title = data.title,
     description = data.description or "",
+    type = data.type or "context",
+    flows = data.flows,
+    structures = data.structures,
   })
 
   insert_items(root, list_id, items)
@@ -246,6 +271,16 @@ function M.update_context(root, updated_context, new_items, updated_items, title
   if updated_context.description ~= nil then
     set.description = updated_context.description or ""
   end
+  if updated_context.type ~= nil then
+    set.type = updated_context.type
+  end
+  if updated_context.flows ~= nil then
+    set.flows = updated_context.flows
+  end
+
+  if updated_context.structures ~= nil then
+    set.flows = updated_context.structures
+  end
 
   if next(set) ~= nil then
     d.lists:update({ where = { id = list_id }, set = set })
@@ -305,6 +340,9 @@ function M.load_list(root, id)
       id = list.id,
       title = list.title,
       description = list.description,
+      type = list.type or "context",
+      flows = list.flows,
+      structures = list.structures,
       items = items,
     }
   end)

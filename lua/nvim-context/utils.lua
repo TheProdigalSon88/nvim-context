@@ -7,6 +7,7 @@ function Utils.qflist_to_context(context, previous_context)
    local ctx = type(context.context) == "table" and context.context or {}
    local result = {}
    local new = true
+   local ctx_type = ctx.type or "context"
    if previous_context then
       result.id = previous_context.id
       if previous_context.description ~= ctx.description then
@@ -15,10 +16,18 @@ function Utils.qflist_to_context(context, previous_context)
       if previous_context.title ~= context.title then
          result.title = context.title
       end
+      if (previous_context.type or "context") ~= ctx_type then
+         result.type = ctx_type
+      end
+      if not vim.deep_equal(previous_context.flows or {}, ctx.flows or {}) then
+         result.flows = ctx.flows or {}
+      end
       new = false
    else
       result.description = ctx.description
       result.title = context.title
+      result.type = ctx_type
+      result.flows = ctx.flows
    end
    return new, result
 end

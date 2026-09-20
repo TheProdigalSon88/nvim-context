@@ -7,6 +7,28 @@ local Context = {}
 ---@type ContextStackItem[]
 Context.stack = {}
 
+local STACK_TYPES = { "context", "flow", "structure" }
+
+---@param typ any
+---@return ContextStackType
+local function list_type(typ)
+   if typ == "flow" or typ == "structure" or typ == "context" then
+      return typ
+   end
+   return "context"
+end
+
+---@return string
+local function current_display_title()
+   local info = vim.fn.getqflist({ title = 0, context = 0 })
+   local title = info.title or ""
+    if title == "" then
+       return ""
+    end
+    local ctx = type(info.context) == "table" and info.context or {}
+    return title .. " [" .. list_type(ctx.type) .. "]"
+end
+
 ---@param item vim.quickfix.entry|ContextItem
 ---@param op "move"|"copy"
 ---@param on_done? fun(success: boolean)
@@ -31,8 +53,7 @@ local defaults = {
 vim.api.nvim_create_autocmd("FileType", {
    pattern = "qf",
    callback = function()
-      local title = vim.fn.getqflist({ title = 0 }).title or ""
-      vim.wo.winbar = title ~= "" and title or ""
+      vim.wo.winbar = current_display_title()
    end,
 })
 
@@ -373,6 +394,8 @@ local function qf_context_from_list(data)
    return {
       description = data.description,
       id = data.id,
+      type = list_type(data.type),
+      flows = data.flows,
    }
 end
 
@@ -420,6 +443,14 @@ local function apply_loaded(entry, action)
    end
 end
 
+---@param new_context table
+local function write_qf_context(new_context)
+   vim.fn.setqflist({}, "r", { context = new_context })
+   if Context.Options and Context.Options.trouble then
+      require("trouble").refresh("qflist")
+   end
+end
+
 ---@return number|string|nil
 local function qf_list_id()
    local ctx = vim.fn.getqflist({ context = 0 }).context
@@ -455,10 +486,22 @@ end
 local function showing_stack_entry(entry)
    local info = vim.fn.getqflist({ context = 0, title = 0 })
    local ctx = type(info.context) == "table" and info.context or {}
+   if list_type(ctx.type) ~= "context" then
+      return false
+   end
    if entry.id then
       return ctx.id == entry.id
    end
    return (ctx.id == nil or ctx.id == "") and (info.title or "") == entry.title
+end
+
+---@param t any
+---@return table
+local function tbl_or_empty(t)
+   if type(t) ~= "table" or vim.tbl_isempty(t) then
+      return {}
+   end
+   return t
 end
 
 ---@param item vim.quickfix.entry
@@ -492,12 +535,15 @@ local function qf_items_match(a, b)
 end
 
 --- Live qflist differs from the last saved DB row (or an unsaved list has content).
---- Item ids are ignored (they are not stamped onto the qflist until reload, so a
---- post-save list would otherwise always look dirty).
+--- Flow/structure views are not dirty. Item ids are ignored (they are not stamped onto
+--- the qflist until reload, so a post-save list would otherwise always look dirty).
 ---@return boolean
 local function current_is_dirty()
    local info = vim.fn.getqflist({ title = 0, items = 0, context = 0 })
    local ctx = type(info.context) == "table" and info.context or {}
+   if list_type(ctx.type) ~= "context" then
+      return false
+   end
    local items = info.items or {}
    local id = ctx.id
    if id == nil or id == "" then
@@ -505,6 +551,9 @@ local function current_is_dirty()
          return true
       end
       if (ctx.description or "") ~= "" then
+         return true
+      end
+      if type(ctx.flows) == "table" and not vim.tbl_isempty(ctx.flows) then
          return true
       end
       return false
@@ -521,6 +570,9 @@ local function current_is_dirty()
    end
    local lctx = type(loaded.context) == "table" and loaded.context or {}
    if (ctx.description or "") ~= (lctx.description or "") then
+      return true
+   end
+   if not vim.deep_equal(tbl_or_empty(ctx.flows), tbl_or_empty(lctx.flows)) then
       return true
    end
    return not qf_items_match(items, loaded.items or {})
@@ -574,7 +626,7 @@ local function activate_idx(idx, action)
    apply_loaded({
       title = entry.title,
       items = {},
-      context = {},
+      context = { type = "context" },
    }, action)
 end
 
@@ -978,7 +1030,7 @@ function Context.LoadContext()
                   log.error("context must have title")
                   return
                end
-               push_loaded({ title = title, items = {}, context = {} }, " ")
+               push_loaded({ title = title, items = {}, context = { type = "context" } }, " ")
                log.info("created context " .. title)
             end)
          end)
@@ -1137,6 +1189,311 @@ function Context.AddEditContextTitle()
    end)
 end
 
+function Context.AddFlow()
+   local info = vim.fn.getqflist({ context = 0 })
+   local context = type(info.context) == "table" and info.context or {}
+
+   vim.ui.input({ prompt = "Flow name: " }, function(name)
+      if name == nil or name == "" then
+         log.error("flow must have a name")
+         return
+      end
+      local new_context = vim.deepcopy(context)
+      local flows = new_context.flows
+      if type(flows) ~= "table" then
+         flows = {}
+      end
+      table.insert(flows, { title = name, items = {} })
+      new_context.flows = flows
+      write_qf_context(new_context)
+      log.info("added flow: " .. name)
+   end)
+end
+
+---@return vim.quickfix.entry|nil
+local function current_trouble_qf_item()
+   if vim.bo.filetype ~= "trouble" and not vim.w.trouble then
+      return nil
+   end
+   local ok, View = pcall(require, "trouble.view")
+   if not ok then
+      return nil
+   end
+   local buf = vim.api.nvim_get_current_buf()
+   for _, entry in ipairs(View.get({ open = true, mode = "qflist" }) or {}) do
+      local view = entry.view
+      if view and view.win and view.win.buf == buf and type(view.at) == "function" then
+         local at = view:at()
+         local item = at and at.item
+         if type(item) == "table" then
+            return item.item or item
+         end
+      end
+   end
+end
+
+---@param arg1 any
+---@param arg2 any
+---@return number|nil, vim.quickfix.entry|nil
+local function resolve_list_item(arg1, arg2)
+   local raw
+   if type(arg1) == "table" then
+      local ctx = arg1
+      if arg1.item == nil and type(arg2) == "table" then
+         ctx = arg2
+      end
+      raw = ctx.item and (ctx.item.item or ctx.item)
+   elseif vim.bo.filetype == "qf" then
+      local qflist = vim.fn.getqflist()
+      local idx = arg1 or vim.fn.line(".")
+      return idx, qflist[idx]
+   else
+      raw = current_trouble_qf_item()
+   end
+   if type(raw) ~= "table" then
+      return nil
+   end
+   local qflist = vim.fn.getqflist()
+   local idx = utils.find_qf_index(qflist, raw)
+   return idx, idx and qflist[idx] or nil
+end
+
+---@param arg1 any
+---@param arg2 any
+function Context.AddItemToFlow(arg1, arg2)
+   local from_trouble_ctx = type(arg1) == "table"
+   local in_qf = vim.bo.filetype == "qf"
+   local in_trouble = vim.bo.filetype == "trouble" or vim.w.trouble
+   if not from_trouble_ctx and not in_qf and not in_trouble then
+      log.error("AddItemToFlow must be run from the quickfix or trouble list")
+      return
+   end
+
+   local idx, item = resolve_list_item(arg1, arg2)
+   if not item or not idx then
+      log.error("no context reference under cursor")
+      return
+   end
+
+   local info = vim.fn.getqflist({ context = 0 })
+   local context = type(info.context) == "table" and vim.deepcopy(info.context) or {}
+   local flows = context.flows
+   if type(flows) ~= "table" or #flows == 0 then
+      log.info("no flows available")
+      return
+   end
+
+   vim.ui.select(flows, {
+      prompt = "Add item to flow:",
+      format_item = function(flow)
+         return flow.title or ""
+      end,
+   }, function(choice)
+      if not choice then
+         return
+      end
+      choice.items = type(choice.items) == "table" and choice.items or {}
+      local item_id = (type(item.user_data) == "table" and item.user_data.id) or idx
+      for _, existing in ipairs(choice.items) do
+         if existing[1] == item_id then
+            log.info("item already in flow: " .. (choice.title or ""))
+            return
+         end
+      end
+       table.insert(choice.items, { item_id, {} })
+       write_qf_context(context)
+       log.info("added item to flow: " .. (choice.title or ""))
+    end)
+end
+
+---@param arg1 any
+---@param arg2 any
+function Context.RemoveItemFromFlow(arg1, arg2)
+   local from_trouble_ctx = type(arg1) == "table"
+   local in_qf = vim.bo.filetype == "qf"
+   local in_trouble = vim.bo.filetype == "trouble" or vim.w.trouble
+   if not from_trouble_ctx and not in_qf and not in_trouble then
+      log.error("RemoveItemFromFlow must be run from the quickfix or trouble list")
+      return
+   end
+
+   local idx, item = resolve_list_item(arg1, arg2)
+   if not item or not idx then
+      log.error("no context reference under cursor")
+      return
+   end
+
+   local info = vim.fn.getqflist({ context = 0 })
+   local context = type(info.context) == "table" and vim.deepcopy(info.context) or {}
+   local flows = context.flows
+   if type(flows) ~= "table" or #flows == 0 then
+      log.info("no flows available")
+      return
+   end
+
+   local item_id = (type(item.user_data) == "table" and item.user_data.id) or idx
+   ---@param flow ContextFlow
+   ---@return integer|nil
+   local function membership_index(flow)
+      if type(flow.items) ~= "table" then
+         return nil
+      end
+      for i, existing in ipairs(flow.items) do
+         if existing[1] == item_id or existing[1] == idx then
+            return i
+         end
+      end
+      return nil
+   end
+
+   local containing = {}
+   for _, flow in ipairs(flows) do
+      if membership_index(flow) then
+         table.insert(containing, flow)
+      end
+   end
+
+   if #containing == 0 then
+      log.info("item is not in any flow")
+      return
+   end
+
+   local function remove_from(flow)
+      local i = membership_index(flow)
+      if not i then
+         return
+      end
+      table.remove(flow.items, i)
+      write_qf_context(context)
+      log.info("removed item from flow: " .. (flow.title or ""))
+   end
+
+   if #containing == 1 then
+      remove_from(containing[1])
+      return
+   end
+
+    vim.ui.select(containing, {
+       prompt = "Remove item from flow:",
+       format_item = function(flow)
+          return flow.title or ""
+       end,
+    }, function(choice)
+       if not choice then
+          return
+       end
+       remove_from(choice)
+    end)
+end
+
+---@param flow ContextFlow
+---@param qflist vim.quickfix.entry[]
+---@return vim.quickfix.entry[]
+local function flow_to_qfitems(flow, qflist)
+   local items = {}
+   if type(flow.items) ~= "table" then
+      return items
+   end
+   for _, pair in ipairs(flow.items) do
+      local flow_id = pair[1]
+      for i, item in ipairs(qflist) do
+         local id = (type(item.user_data) == "table" and item.user_data.id) or i
+         if id == flow_id or i == flow_id then
+            table.insert(items, item)
+            break
+         end
+      end
+   end
+   return items
+end
+
+---@param flow ContextFlow
+local function activate_flow(flow)
+   local qflist = vim.fn.getqflist()
+   local items = flow_to_qfitems(flow, qflist)
+   if #items == 0 then
+      log.info("flow has no items: " .. (flow.title or ""))
+      return
+   end
+
+    ---@type LoadedContext
+    local loaded = {
+       title = flow.title or "",
+       items = items,
+       context = {
+          type = "flow",
+          description = flow.description,
+       },
+    }
+
+    apply_loaded(loaded, "r")
+    if vim.bo.filetype == "qf" then
+       vim.wo.winbar = current_display_title()
+    end
+    log.info("loaded flow: " .. loaded.title)
+end
+
+---@param arg1 any
+---@param arg2 any
+function Context.ActivateItemFlow(arg1, arg2)
+   local from_trouble_ctx = type(arg1) == "table"
+   local in_qf = vim.bo.filetype == "qf"
+   local in_trouble = vim.bo.filetype == "trouble" or vim.w.trouble
+   if not from_trouble_ctx and not in_qf and not in_trouble then
+      log.error("ActivateItemFlow must be run from the quickfix or trouble list")
+      return
+   end
+
+   local idx, item = resolve_list_item(arg1, arg2)
+   if not item or not idx then
+      log.error("no context reference under cursor")
+      return
+   end
+
+   local info = vim.fn.getqflist({ context = 0 })
+   local context = type(info.context) == "table" and info.context or {}
+   local flows = context.flows
+   if type(flows) ~= "table" or #flows == 0 then
+      log.info("no flows available")
+      return
+   end
+
+   local item_id = (type(item.user_data) == "table" and item.user_data.id) or idx
+   local containing = {}
+   for _, flow in ipairs(flows) do
+      if type(flow.items) == "table" then
+         for _, existing in ipairs(flow.items) do
+            if existing[1] == item_id or existing[1] == idx then
+               table.insert(containing, flow)
+               break
+            end
+         end
+      end
+   end
+
+   if #containing == 0 then
+      log.info("item is not in any flow")
+      return
+   end
+
+   if #containing == 1 then
+      activate_flow(containing[1])
+      return
+   end
+
+   vim.ui.select(containing, {
+      prompt = "Activate flow:",
+      format_item = function(flow)
+         return flow.title or ""
+      end,
+   }, function(choice)
+      if not choice then
+         return
+      end
+      activate_flow(choice)
+   end)
+end
+
 function Context.AddEditContextDescription()
    local context = vim.fn.getqflist({ context = 0 }).context
    local current_description = (type(context) == "table" and context.description) or ""
@@ -1159,6 +1516,31 @@ function Context.AddEditContextDescription()
          require("trouble").refresh("qflist")
       end
       log.info("added/updated context description")
+    end)
+end
+
+function Context.SetContextType()
+   local info = vim.fn.getqflist({ context = 0 })
+    local context = type(info.context) == "table" and info.context or {}
+    local current = list_type(context.type)
+
+    vim.ui.select(STACK_TYPES, {
+       prompt = "List type (current: " .. current .. "):",
+    }, function(choice)
+       if not choice then
+          return
+       end
+       local typ = list_type(choice)
+       local new_context = vim.deepcopy(context)
+       new_context.type = typ
+       vim.fn.setqflist({}, "r", { context = new_context })
+       if vim.bo.filetype == "qf" then
+          vim.wo.winbar = current_display_title()
+       end
+       if Context.Options and Context.Options.trouble then
+          require("trouble").refresh("qflist")
+       end
+       log.info("set list type to " .. typ)
     end)
 end
 
@@ -1353,7 +1735,7 @@ end
 function Context.StatuslineComponent()
    return {
       function()
-         return vim.fn.getqflist({ title = 0 }).title or ""
+         return current_display_title()
       end,
       cond = function()
          if not Context.Options.statusline then
