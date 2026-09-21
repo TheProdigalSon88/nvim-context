@@ -7,16 +7,26 @@ local Context = {}
 ---@type ContextStackItem[]
 Context.stack = {}
 
-local STACK_TYPES = { "context", "flow", "structure" }
+local STACK_TYPES = { "context", "flow" }
 
 ---@param typ any
 ---@return ContextStackType
 local function list_type(typ)
-   if typ == "flow" or typ == "structure" or typ == "context" then
+   if typ == "flow" or typ == "context" then
       return typ
    end
    return "context"
 end
+
+---@param ctx any
+---@return boolean
+local function is_flow_view(ctx)
+   return type(ctx) == "table" and type(ctx.active_flow) == "string" and ctx.active_flow ~= ""
+end
+
+--- Parent ContextList snapshot while a nested flow view replaces the qflist.
+---@type { title: string, items: vim.quickfix.entry[], context: table }|nil
+local flow_parent = nil
 
 ---@return string
 local function current_display_title()
@@ -26,7 +36,8 @@ local function current_display_title()
        return ""
     end
     local ctx = type(info.context) == "table" and info.context or {}
-    return title .. " [" .. list_type(ctx.type) .. "]"
+    local typ = is_flow_view(ctx) and "flow" or list_type(ctx.type)
+    return title .. " [" .. typ .. "]"
 end
 
 ---@param item vim.quickfix.entry|ContextItem
@@ -432,7 +443,11 @@ end
 
 ---@param entry LoadedContext
 ---@param action string
-local function apply_loaded(entry, action)
+---@param opts? { keep_flow_parent?: boolean }
+local function apply_loaded(entry, action, opts)
+   if not (opts and opts.keep_flow_parent) then
+      flow_parent = nil
+   end
    vim.fn.setqflist({}, action, {
       title = entry.title,
       items = entry.items or {},
@@ -486,7 +501,7 @@ end
 local function showing_stack_entry(entry)
    local info = vim.fn.getqflist({ context = 0, title = 0 })
    local ctx = type(info.context) == "table" and info.context or {}
-   if list_type(ctx.type) ~= "context" then
+   if is_flow_view(ctx) or list_type(ctx.type) ~= "context" then
       return false
    end
    if entry.id then
@@ -535,12 +550,28 @@ local function qf_items_match(a, b)
 end
 
 --- Live qflist differs from the last saved DB row (or an unsaved list has content).
---- Flow/structure views are not dirty. Item ids are ignored (they are not stamped onto
---- the qflist until reload, so a post-save list would otherwise always look dirty).
+--- Flow views are dirty only when nested flows differ from the parent DB row.
+--- Item ids are ignored (they are not stamped onto the qflist until reload, so a
+--- post-save list would otherwise always look dirty).
 ---@return boolean
 local function current_is_dirty()
    local info = vim.fn.getqflist({ title = 0, items = 0, context = 0 })
    local ctx = type(info.context) == "table" and info.context or {}
+   if is_flow_view(ctx) then
+      local id = ctx.id or (Context.stack[1] and Context.stack[1].id)
+      if id == nil or id == "" then
+         return type(ctx.flows) == "table" and not vim.tbl_isempty(ctx.flows)
+      end
+      if not Context.root then
+         return type(ctx.flows) == "table" and not vim.tbl_isempty(ctx.flows)
+      end
+      local loaded = load_as_loaded(id)
+      if not loaded then
+         return true
+      end
+      local lctx = type(loaded.context) == "table" and loaded.context or {}
+      return not vim.deep_equal(tbl_or_empty(ctx.flows), tbl_or_empty(lctx.flows))
+   end
    if list_type(ctx.type) ~= "context" then
       return false
    end
@@ -1258,6 +1289,93 @@ local function resolve_list_item(arg1, arg2)
    return idx, idx and qflist[idx] or nil
 end
 
+---@param item vim.quickfix.entry
+---@param idx integer
+---@return number
+local function item_ref_id(item, idx)
+   local ud = item.user_data
+   if type(ud) == "table" and ud.id ~= nil then
+      return ud.id
+   end
+   return idx
+end
+
+---@class FlowEndpoint
+---@field idx integer
+---@field item vim.quickfix.entry
+---@field id number
+
+---@param arg1 any
+---@param arg2 any
+---@return FlowEndpoint[]|nil
+local function resolve_flow_endpoints(arg1, arg2)
+   local qflist = vim.fn.getqflist()
+   if vim.bo.filetype == "qf" and type(arg1) ~= "table" then
+      local a = arg1 or vim.fn.line(".")
+      local b = arg2 or a
+      if a > b then
+         a, b = b, a
+      end
+      local endpoints = {}
+      for i = a, b do
+         local item = qflist[i]
+         if type(item) == "table" then
+            table.insert(endpoints, { idx = i, item = item, id = item_ref_id(item, i) })
+         end
+      end
+      if #endpoints == 0 then
+         return nil
+      end
+      return endpoints
+   end
+   local idx, item = resolve_list_item(arg1, arg2)
+   if not item or not idx then
+      return nil
+   end
+   return { { idx = idx, item = item, id = item_ref_id(item, idx) } }
+end
+
+---@param flow ContextFlow
+---@param id number
+---@param idx integer
+---@return boolean
+local function flow_has_item(flow, id, idx)
+   if type(flow.items) ~= "table" then
+      return false
+   end
+   for _, pair in ipairs(flow.items) do
+      if pair[1] == id or pair[1] == idx or pair[2] == id or pair[2] == idx then
+         return true
+      end
+   end
+   return false
+end
+
+---@param items number[][]
+---@param from number
+---@param to number
+---@return boolean
+local function connection_exists(items, from, to)
+   for _, pair in ipairs(items) do
+      if pair[1] == from and pair[2] == to then
+         return true
+      end
+   end
+   return false
+end
+
+---@param item vim.quickfix.entry
+---@return string
+local function format_flow_endpoint(item)
+   local name = item.filename or ""
+   local lnum = item.lnum or 0
+   local text = item.text or ""
+   if text ~= "" then
+      return string.format("%s:%d %s", name, lnum, text)
+   end
+   return string.format("%s:%d", name, lnum)
+end
+
 ---@param arg1 any
 ---@param arg2 any
 function Context.AddItemToFlow(arg1, arg2)
@@ -1269,8 +1387,8 @@ function Context.AddItemToFlow(arg1, arg2)
       return
    end
 
-   local idx, item = resolve_list_item(arg1, arg2)
-   if not item or not idx then
+   local endpoints = resolve_flow_endpoints(arg1, arg2)
+   if not endpoints then
       log.error("no context reference under cursor")
       return
    end
@@ -1283,8 +1401,36 @@ function Context.AddItemToFlow(arg1, arg2)
       return
    end
 
+    ---@param flow ContextFlow
+    ---@param pairs_to_add number[][]
+    local function add_connections(flow, pairs_to_add)
+       flow.items = type(flow.items) == "table" and flow.items or {}
+       local added = 0
+       local disconnected = 0
+       for _, pair in ipairs(pairs_to_add) do
+          if pair[1] == pair[2] or connection_exists(flow.items, pair[1], pair[2]) then
+             -- skip
+          elseif #flow.items > 0 and not flow_has_item(flow, pair[1], pair[1]) then
+             disconnected = disconnected + 1
+          else
+             table.insert(flow.items, { pair[1], pair[2] })
+             added = added + 1
+          end
+       end
+       if added == 0 then
+          if disconnected > 0 then
+             log.error("source is not in flow: " .. (flow.title or ""))
+          else
+             log.info("connection already in flow: " .. (flow.title or ""))
+          end
+          return
+       end
+       write_qf_context(context)
+       log.info("added connection to flow: " .. (flow.title or ""))
+    end
+
    vim.ui.select(flows, {
-      prompt = "Add item to flow:",
+      prompt = "Add connection to flow:",
       format_item = function(flow)
          return flow.title or ""
       end,
@@ -1292,18 +1438,44 @@ function Context.AddItemToFlow(arg1, arg2)
       if not choice then
          return
       end
+      if #endpoints >= 2 then
+         local pairs_to_add = {}
+         for i = 1, #endpoints - 1 do
+            table.insert(pairs_to_add, { endpoints[i].id, endpoints[i + 1].id })
+         end
+         add_connections(choice, pairs_to_add)
+         return
+      end
+
+      local source = endpoints[1]
       choice.items = type(choice.items) == "table" and choice.items or {}
-      local item_id = (type(item.user_data) == "table" and item.user_data.id) or idx
-      for _, existing in ipairs(choice.items) do
-         if existing[1] == item_id then
-            log.info("item already in flow: " .. (choice.title or ""))
-            return
+      if #choice.items > 0 and not flow_has_item(choice, source.id, source.idx) then
+         log.error("source is not in flow: " .. (choice.title or ""))
+         return
+      end
+      local qflist = vim.fn.getqflist()
+      local candidates = {}
+      for i, item in ipairs(qflist) do
+         if i ~= source.idx then
+            table.insert(candidates, { idx = i, item = item, id = item_ref_id(item, i) })
          end
       end
-       table.insert(choice.items, { item_id, {} })
-       write_qf_context(context)
-       log.info("added item to flow: " .. (choice.title or ""))
-    end)
+      if #candidates == 0 then
+         log.error("need another item to form a connection")
+         return
+      end
+      vim.ui.select(candidates, {
+         prompt = "Connect to:",
+         format_item = function(entry)
+            return format_flow_endpoint(entry.item)
+         end,
+      }, function(target)
+         if not target then
+            return
+         end
+         add_connections(choice, { { source.id, target.id } })
+      end)
+   end)
 end
 
 ---@param arg1 any
@@ -1331,24 +1503,10 @@ function Context.RemoveItemFromFlow(arg1, arg2)
       return
    end
 
-   local item_id = (type(item.user_data) == "table" and item.user_data.id) or idx
-   ---@param flow ContextFlow
-   ---@return integer|nil
-   local function membership_index(flow)
-      if type(flow.items) ~= "table" then
-         return nil
-      end
-      for i, existing in ipairs(flow.items) do
-         if existing[1] == item_id or existing[1] == idx then
-            return i
-         end
-      end
-      return nil
-   end
-
+   local item_id = item_ref_id(item, idx)
    local containing = {}
    for _, flow in ipairs(flows) do
-      if membership_index(flow) then
+      if flow_has_item(flow, item_id, idx) then
          table.insert(containing, flow)
       end
    end
@@ -1358,12 +1516,15 @@ function Context.RemoveItemFromFlow(arg1, arg2)
       return
    end
 
+   ---@param flow ContextFlow
    local function remove_from(flow)
-      local i = membership_index(flow)
-      if not i then
-         return
+      local kept = {}
+      for _, pair in ipairs(flow.items) do
+         if pair[1] ~= item_id and pair[1] ~= idx and pair[2] ~= item_id and pair[2] ~= idx then
+            table.insert(kept, pair)
+         end
       end
-      table.remove(flow.items, i)
+      flow.items = kept
       write_qf_context(context)
       log.info("removed item from flow: " .. (flow.title or ""))
    end
@@ -1394,43 +1555,69 @@ local function flow_to_qfitems(flow, qflist)
    if type(flow.items) ~= "table" then
       return items
    end
-   for _, pair in ipairs(flow.items) do
-      local flow_id = pair[1]
+   local seen = {}
+   local function append_id(flow_id)
+      if type(flow_id) ~= "number" then
+         return
+      end
       for i, item in ipairs(qflist) do
-         local id = (type(item.user_data) == "table" and item.user_data.id) or i
+         local id = item_ref_id(item, i)
          if id == flow_id or i == flow_id then
-            table.insert(items, item)
-            break
+            if not seen[i] then
+               seen[i] = true
+               table.insert(items, item)
+            end
+            return
          end
       end
+   end
+   for _, pair in ipairs(flow.items) do
+      append_id(pair[1])
+      append_id(pair[2])
    end
    return items
 end
 
 ---@param flow ContextFlow
 local function activate_flow(flow)
-   local qflist = vim.fn.getqflist()
-   local items = flow_to_qfitems(flow, qflist)
+   local info = vim.fn.getqflist({ context = 0, title = 0, items = 0 })
+   local ctx = type(info.context) == "table" and info.context or {}
+   if not flow_parent then
+      local parent_ctx = vim.deepcopy(ctx)
+      parent_ctx.active_flow = nil
+      flow_parent = {
+         title = info.title or "",
+         items = info.items or {},
+         context = parent_ctx,
+      }
+   end
+
+   local items = flow_to_qfitems(flow, flow_parent.items)
    if #items == 0 then
       log.info("flow has no items: " .. (flow.title or ""))
+      if not is_flow_view(ctx) then
+         flow_parent = nil
+      end
       return
    end
 
-    ---@type LoadedContext
-    local loaded = {
-       title = flow.title or "",
-       items = items,
-       context = {
-          type = "flow",
-          description = flow.description,
-       },
-    }
+   local view_ctx = vim.deepcopy(flow_parent.context)
+   view_ctx.flows = ctx.flows or flow_parent.context.flows
+   view_ctx.id = ctx.id or flow_parent.context.id
+   view_ctx.active_flow = flow.title
 
-    apply_loaded(loaded, "r")
-    if vim.bo.filetype == "qf" then
-       vim.wo.winbar = current_display_title()
-    end
-    log.info("loaded flow: " .. loaded.title)
+   ---@type LoadedContext
+   local loaded = {
+      title = flow.title or "",
+      items = items,
+      context = view_ctx,
+   }
+
+   apply_loaded(loaded, "r", { keep_flow_parent = true })
+   if vim.bo.filetype == "qf" then
+      vim.wo.winbar = current_display_title()
+   end
+   log.info("loaded flow: " .. loaded.title)
 end
 
 ---@param arg1 any
@@ -1458,16 +1645,11 @@ function Context.ActivateItemFlow(arg1, arg2)
       return
    end
 
-   local item_id = (type(item.user_data) == "table" and item.user_data.id) or idx
+   local item_id = item_ref_id(item, idx)
    local containing = {}
    for _, flow in ipairs(flows) do
-      if type(flow.items) == "table" then
-         for _, existing in ipairs(flow.items) do
-            if existing[1] == item_id or existing[1] == idx then
-               table.insert(containing, flow)
-               break
-            end
-         end
+      if flow_has_item(flow, item_id, idx) then
+         table.insert(containing, flow)
       end
    end
 
@@ -1546,12 +1728,6 @@ end
 
 ---@return boolean
 function Context.SaveContext()
-   local title = vim.fn.getqflist({ title = 0 }).title
-   if title == "" or title == nil then
-      log.error("set a title for context before saving")
-      return false
-   end
-
    if not Context.root then
       Context.root = vim.fs.root(0, ".git")
       if not Context.root then
@@ -1561,9 +1737,62 @@ function Context.SaveContext()
    end
 
    ---@type vim.fn.setqflist.what
-   local info = vim.fn.getqflist({ context = 0, items = 0, title = 0 })
+   local live = vim.fn.getqflist({ context = 0, items = 0, title = 0 })
+   local live_ctx = type(live.context) == "table" and live.context or {}
+   local viewing_flow = is_flow_view(live_ctx)
+
+   ---@type vim.fn.setqflist.what
+   local info = live
+   if viewing_flow then
+      local parent_ctx
+      if flow_parent and type(flow_parent.context) == "table" then
+         parent_ctx = vim.deepcopy(flow_parent.context)
+      else
+         parent_ctx = vim.deepcopy(live_ctx)
+      end
+      parent_ctx.active_flow = nil
+      parent_ctx.flows = live_ctx.flows or parent_ctx.flows or {}
+      parent_ctx.id = live_ctx.id or parent_ctx.id or (Context.stack[1] and Context.stack[1].id)
+      info = {
+         title = (flow_parent and flow_parent.title ~= "" and flow_parent.title)
+            or (Context.stack[1] and Context.stack[1].title)
+            or "",
+         items = flow_parent and flow_parent.items or {},
+         context = parent_ctx,
+      }
+   end
+
+   local title = info.title
+   if title == "" or title == nil then
+      log.error("set a title for context before saving")
+      return false
+   end
 
    local db_id = type(info.context) == "table" and info.context.id or nil
+
+   -- A flow view is not its own list: write flows onto the parent ContextList only.
+   if viewing_flow and db_id then
+      local ok, err = pcall(
+         sql.update_context,
+         Context.root,
+         { id = db_id, flows = live_ctx.flows or {} },
+         {},
+         {},
+         title,
+         nil
+      )
+      if not ok then
+         log.error("failed to update context: " .. tostring(err))
+         return false
+      end
+      if Context.stack[1] then
+         Context.stack[1].id = db_id
+         Context.stack[1].title = title
+      end
+      log.info("updated context: " .. title)
+      return true
+   end
+
    local previous_ok, previous_context = true, nil
    if db_id then
       previous_ok, previous_context = pcall(sql.load_list, Context.root, db_id)
@@ -1590,8 +1819,18 @@ function Context.SaveContext()
          log.error("failed to save context: " .. tostring(new_id))
          return false
       end
-      local saved_ctx = type(info.context) == "table" and vim.deepcopy(info.context) or {}
-      saved_ctx.id = new_id
+      local saved_ctx
+      if viewing_flow then
+         saved_ctx = vim.deepcopy(live_ctx)
+         saved_ctx.id = new_id
+         saved_ctx.flows = context.flows
+         if flow_parent and flow_parent.context then
+            flow_parent.context.id = new_id
+         end
+      else
+         saved_ctx = type(info.context) == "table" and vim.deepcopy(info.context) or {}
+         saved_ctx.id = new_id
+      end
       vim.fn.setqflist({}, "r", { context = saved_ctx })
       if Context.stack[1] then
          Context.stack[1].id = new_id

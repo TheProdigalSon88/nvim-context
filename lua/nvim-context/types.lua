@@ -10,7 +10,6 @@
 --- MRU stack entry. Current context is always index 1.
 ---@alias ContextStackType
 ---| "flow"
----| "structure"
 ---| "context"
 
 ---@class ContextStackItem
@@ -19,18 +18,16 @@
 
 ---@class ContextFlow
 ---@field title string
----@field items ContextStructureItem[]
+---@field items number[][]
 ---@field description string
 
---- Pair: item id plus related item ids.
----@class ContextStructureItem
----@field [1] number
----@field [2] number[]
-
----@class ContextStructure
----@field title string
----@field description string
----@field items ContextStructureItem[]
+--- Live qflist `context` table. `active_flow` marks a nested flow view and is not persisted.
+---@class QfListContext
+---@field id? number
+---@field type? ContextStackType
+---@field description? string
+---@field flows? ContextFlow[]
+---@field active_flow? string
 
 ---@class ContextList
 ---@field id? number
@@ -38,7 +35,6 @@
 ---@field title? string
 ---@field description? string
 ---@field flows? ContextFlow[]
----@field structures? ContextStructure[]
 ---@field items? ContextItem[]
 ---@field git_hash? string
 ---@field timestamp string|osdate

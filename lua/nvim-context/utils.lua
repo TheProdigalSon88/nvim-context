@@ -19,8 +19,8 @@ function Utils.qflist_to_context(context, previous_context)
       if (previous_context.type or "context") ~= ctx_type then
          result.type = ctx_type
       end
-      if not vim.deep_equal(previous_context.flows or {}, ctx.flows or {}) then
-         result.flows = ctx.flows or {}
+      if ctx.flows ~= nil then
+         result.flows = ctx.flows
       end
       new = false
    else

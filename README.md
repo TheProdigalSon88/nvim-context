@@ -99,7 +99,12 @@ All public functions on `require("nvim-context")` are subcommands:
 | `DeleteContext` | anywhere | Delete a saved context from the database |
 | `PickContext` | anywhere | Switch among contexts already loaded in this session |
 | `AddEditContextTitle` | anywhere | Set / change the qflist title (context name) |
+| `AddFlow` | anywhere | Prompt for a flow name and append `{ title, items = {} }` to the active context |
+| `AddItemToFlow` | quickfix or trouble | Add a directed connection `{ from, to }`. An empty flow accepts any first pair; later edges must start from an item already in the flow. A qf range of 2+ items links consecutive items; a single item (or Trouble) prompts for the other end |
+| `RemoveItemFromFlow` | quickfix or trouble | Remove every connection involving the cursor item; if it belongs to several flows, pick which one |
+| `ActivateItemFlow` | quickfix or trouble | Pick a flow the item appears in (either end of a connection) and make it the active list |
 | `AddEditContextDescription` | anywhere | Markdown description for the whole context |
+| `SetContextType` | anywhere | Set the list type (`context` or `flow`; default `context`) |
 | `ConvertQFlist` | anywhere | Turn a normal qflist (grep, lsp, …) into context items |
 | `ShowReference` | source buffer | Notes whose ranges cover the cursor; accepts a visual/command range |
 | `ToggleQfDiff` | anywhere | Toggle stale-range highlights when jumping from the qflist |
@@ -131,6 +136,24 @@ These take a Trouble `ctx`, not a command range. **Do not** invoke them via
       require("nvim-context").DeleteTroubleItem(ctx)
    end,
    desc = "Delete context item",
+},
+["<leader>cf"] = {
+   action = function(_, ctx)
+      require("nvim-context").AddItemToFlow(ctx)
+   end,
+   desc = "Add item to flow",
+},
+["<leader>cF"] = {
+   action = function(_, ctx)
+      require("nvim-context").RemoveItemFromFlow(ctx)
+   end,
+   desc = "Remove item from flow",
+},
+["<leader>cA"] = {
+   action = function(_, ctx)
+      require("nvim-context").ActivateItemFlow(ctx)
+   end,
+   desc = "Activate item flow",
 },
 ```
 
@@ -231,7 +254,8 @@ require("lualine").setup({
 })
 ```
 
-Shows the current qflist title when `statusline = true` and the title is non-empty.
+Shows the current qflist title with its list type in brackets (e.g. `Auth [flow]`)
+when `statusline = true` and the title is non-empty.
 
 ### Trouble
 
