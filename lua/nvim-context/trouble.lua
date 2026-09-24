@@ -1,13 +1,12 @@
 local utils = require("nvim-context.utils")
 local Diff = require("nvim-context.diff")
-local log = require("nvim-context.log")
 
 local M = {}
 
 local ns = vim.api.nvim_create_namespace("nvim-context.trouble")
 
 ---@param buf number
-local function decorate_list(buf)
+function M.decorate_list(buf)
    if not vim.api.nvim_buf_is_valid(buf) then
       return
    end
@@ -45,7 +44,7 @@ end
 
 ---@param item trouble.Item
 ---@param ctx trouble.Preview
-local function preview_context_item(item, ctx)
+function M.preview_context_item(item, ctx)
    if not ctx or not ctx.buf or not vim.api.nvim_buf_is_valid(ctx.buf) then
       return
    end
@@ -62,33 +61,6 @@ local function preview_context_item(item, ctx)
    Diff.preview_item(ctx.buf, raw, Render.ns)
 end
 
-function M.setup()
-   local ok, qf = pcall(require, "trouble.sources.qf")
-   if not ok then
-      log.error("trouble.enabled but trouble.nvim is not installed")
-      return
-   end
 
-   Diff.setup_highlight()
-   qf.preview = preview_context_item
-
-   local group = vim.api.nvim_create_augroup("NvimContextTrouble", { clear = true })
-   vim.api.nvim_create_autocmd("FileType", {
-      group = group,
-      pattern = "trouble",
-      callback = function(ev)
-         vim.api.nvim_create_autocmd("TextChanged", {
-            group = group,
-            buffer = ev.buf,
-            callback = function()
-               decorate_list(ev.buf)
-            end,
-         })
-         vim.schedule(function()
-            decorate_list(ev.buf)
-         end)
-      end,
-   })
-end
 
 return M

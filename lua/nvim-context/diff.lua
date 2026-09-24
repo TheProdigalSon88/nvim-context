@@ -4,29 +4,6 @@ local M = {}
 
 M.ns = vim.api.nvim_create_namespace("nvim-context.diff")
 
-local highlight_group
-
-function M.setup_highlight()
-   local link = "DiffDelete"
-   if vim.fn.hlexists("MiniDiffOverDelete") == 1 then
-      link = "MiniDiffOverDelete"
-   end
-   vim.api.nvim_set_hl(0, "NvimContextChanged", {
-      link = link,
-   })
-end
-
-function M.setup()
-   M.setup_highlight()
-   if highlight_group then
-      return
-   end
-   highlight_group = vim.api.nvim_create_augroup("NvimContextDiff", { clear = true })
-   vim.api.nvim_create_autocmd("ColorScheme", {
-      group = highlight_group,
-      callback = M.setup_highlight,
-   })
-end
 
 ---@param buf number
 ---@param ns? number

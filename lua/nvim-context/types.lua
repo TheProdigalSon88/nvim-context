@@ -1,3 +1,8 @@
+---@class FlowEndpoint
+---@field idx integer
+---@field item vim.quickfix.entry
+---@field id number
+
 ---@class ContextListItem
 ---@field id string
 ---@field title string
@@ -87,6 +92,7 @@
 ---@field image? table image.nvim setup opts (default `{ backend = "kitty" }`)
 ---@field integrations? any[] diagram.nvim integrations; nil resolves to markdown at setup
 ---@field renderer_options? table diagram.nvim renderer_options
+---@field keymap? string
 
 ---@class ContextOptions
 ---@field trouble? boolean

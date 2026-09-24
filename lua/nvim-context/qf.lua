@@ -11,8 +11,8 @@ local last_viewer_id ---@type number|nil
 local last_viewer_idx ---@type number|nil
 local edit_group ---@type integer|nil
 local scheduled = false
-local enabled = true
-local viewer_enabled = true
+M.enabled = true
+M.viewer_enabled = true
 
 local function clear()
    if marked_buf then
@@ -75,7 +75,7 @@ local function attach_edit_clear(buf)
 end
 
 local function apply_current()
-   if not enabled or vim.bo.buftype ~= "" then
+   if not M.enabled or vim.bo.buftype ~= "" then
       return
    end
    local info = vim.fn.getqflist({ id = 0, idx = 0, size = 0 })
@@ -111,7 +111,7 @@ local function diagram_enabled()
 end
 
 local function apply_viewer()
-   if not viewer_enabled then
+   if not M.viewer_enabled then
       return
    end
    local info = vim.fn.getqflist({ id = 0, idx = 0, size = 0 })
@@ -133,23 +133,23 @@ local function apply_viewer()
    buffer.show_qf_follow(item, {
       diagram_enabled = diagram_enabled(),
       on_close = function()
-         viewer_enabled = false
+         M.viewer_enabled = false
          last_viewer_id, last_viewer_idx = nil, nil
       end,
    })
 end
 
-local function maybe_show()
-   if scheduled or (not enabled and not viewer_enabled) then
+function M.maybe_show()
+   if scheduled or (not M.enabled and not M.viewer_enabled) then
       return
    end
    local info = vim.fn.getqflist({ id = 0, idx = 0, size = 0 })
-   local viewer_stale = viewer_enabled
+   local viewer_stale = M.viewer_enabled
       and (
          (info.size == 0 and (last_viewer_id ~= nil or last_viewer_idx ~= nil))
          or (info.size > 0 and (info.id ~= last_viewer_id or info.idx ~= last_viewer_idx))
       )
-   local diff_stale = enabled
+   local diff_stale = M.enabled
       and vim.bo.buftype == ""
       and (
          (info.size == 0 and (last_id ~= nil or last_idx ~= nil or marked_buf ~= nil))
@@ -166,30 +166,22 @@ local function maybe_show()
    end)
 end
 
-function M.setup()
-   enabled = true
-   viewer_enabled = true
-   local group = vim.api.nvim_create_augroup("NvimContextQfDiff", { clear = true })
-   vim.api.nvim_create_autocmd({ "SafeState", "BufEnter", "WinEnter", "CursorMoved" }, {
-      group = group,
-      callback = maybe_show,
-   })
-end
+
 
 function M.disable()
-   enabled = false
+   M.enabled = false
    last_id, last_idx = nil, nil
    clear()
 end
 
 function M.enable()
-   enabled = true
-   maybe_show()
+   M.enabled = true
+   M.maybe_show()
 end
 
 ---@return boolean enabled
 function M.toggle()
-   if enabled then
+   if M.enabled then
       M.disable()
       return false
    end
@@ -198,20 +190,20 @@ function M.toggle()
 end
 
 function M.disable_viewer()
-   viewer_enabled = false
+   M.viewer_enabled = false
    last_viewer_id, last_viewer_idx = nil, nil
    buffer.close_qf_follow()
 end
 
 function M.enable_viewer()
-   viewer_enabled = true
+   M.viewer_enabled = true
    last_viewer_id, last_viewer_idx = nil, nil
    apply_viewer()
 end
 
 ---@return boolean enabled
 function M.toggle_viewer()
-   if viewer_enabled then
+   if M.viewer_enabled then
       M.disable_viewer()
       return false
    end
