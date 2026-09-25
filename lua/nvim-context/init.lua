@@ -15,6 +15,8 @@ local diff = require("nvim-context.diff")
 
 local STACK_TYPES = { "context", "flow" }
 
+local open_context_form
+
 --DONE
 function Context.setup(opts)
   Context.Options = vim.tbl_deep_extend("force", setup.defaults, opts or {})
@@ -177,14 +179,7 @@ function Context.LoadContext()
 
     if choice.title == new_context.title then
       utils.confirm_leave_current(function()
-        vim.ui.input({ prompt = "New context title: " }, function(title)
-          if title == nil or title == "" then
-            log.error("context must have title")
-            return
-          end
-          utils.push_loaded({ title = title, items = {}, context = { type = "context" } }, " ")
-          log.info("created context " .. title)
-        end)
+        open_context_form(true)
       end)
       return
     end
@@ -325,23 +320,142 @@ function Context.PickContext()
 end
 
 --DONE
-function Context.AddEditContextTitle()
-  Context.current_title = vim.fn.getqflist({ title = 0 }).title or ""
-
-  vim.ui.input({ prompt = "Quickfix title: ", default = Context.current_title }, function(title)
-    if title == nil or title == "" then
-      log.error("context must have title")
+---@param create boolean
+function open_context_form(create)
+  if not Context.root then
+    Context.root = vim.fs.root(0, ".git")
+    if not Context.root then
+      log.error("not inside a git repository")
       return
     end
-    vim.fn.setqflist({}, "r", { title = title })
-    if Context.stack[1] then
-      Context.stack[1].title = title
+  end
+
+  local title, description = "", ""
+  local title_timestamp, title_git_hash, description_timestamp, description_git_hash
+  local items = {}
+  local creating = { pending = create and true or false }
+
+  if not create then
+    local info = vim.fn.getqflist({ title = 0, context = 0, items = 0 })
+    local ctx = type(info.context) == "table" and info.context or {}
+    if utils.is_flow_view(ctx) then
+      log.error("leave the flow view before editing the context")
+      return
     end
-    if Context.Options.trouble then
+    title = info.title or ""
+    description = ctx.description or ""
+    title_timestamp = ctx.title_timestamp
+    title_git_hash = ctx.title_git_hash
+    description_timestamp = ctx.description_timestamp
+    description_git_hash = ctx.description_git_hash
+    items = info.items or {}
+  end
+
+  local diagram = Context.Options and Context.Options.diagram
+  local diagram_enabled = type(diagram) == "table" and diagram.enabled and true or false
+
+  local function apply_result(result)
+    if creating.pending then
+      utils.push_loaded({
+        title = result.title,
+        items = {},
+        context = {
+          type = "context",
+          description = result.description,
+          title_timestamp = result.title_timestamp,
+          title_git_hash = result.title_git_hash,
+          description_timestamp = result.description_timestamp,
+          description_git_hash = result.description_git_hash,
+        },
+      }, " ")
+      creating.pending = false
+      return true
+    end
+
+    local fresh = vim.fn.getqflist()
+    for _, upd in ipairs(result.item_updates or {}) do
+      local idx = utils.find_qf_index(fresh, upd.item)
+      if idx then
+        local ud = type(fresh[idx].user_data) == "table" and fresh[idx].user_data or {}
+        ud.description = upd.description
+        if upd.timestamp ~= nil then
+          ud.timestamp = upd.timestamp
+        end
+        if upd.git_hash ~= nil then
+          ud.git_hash = upd.git_hash
+        end
+        fresh[idx].user_data = ud
+        if type(upd.item.user_data) == "table" then
+          upd.item.user_data.description = upd.description
+          upd.item.user_data.timestamp = ud.timestamp
+          upd.item.user_data.git_hash = ud.git_hash
+        end
+      end
+    end
+
+    local info = vim.fn.getqflist({ context = 0 })
+    local ctx = type(info.context) == "table" and vim.deepcopy(info.context) or {}
+    ctx.description = result.description
+    ctx.type = utils.list_type(ctx.type)
+    ctx.title_timestamp = result.title_timestamp
+    ctx.title_git_hash = result.title_git_hash
+    ctx.description_timestamp = result.description_timestamp
+    ctx.description_git_hash = result.description_git_hash
+    vim.fn.setqflist({}, "r", { title = result.title, items = fresh, context = ctx })
+    if Context.stack[1] then
+      Context.stack[1].title = result.title
+    end
+    if Context.Options and Context.Options.trouble then
       require("trouble").refresh("qflist")
     end
-    log.info("added/updated context title")
-  end)
+    return true
+  end
+
+  buffer.open_context_editor({
+    title = title,
+    description = description,
+    title_timestamp = title_timestamp,
+    title_git_hash = title_git_hash,
+    description_timestamp = description_timestamp,
+    description_git_hash = description_git_hash,
+    items = items,
+    diagram_enabled = diagram_enabled,
+    diagram_snippets = diagram_enabled and diagram.snippets or nil,
+    on_apply = function(result)
+      local was_create = creating.pending
+      if not apply_result(result) then
+        return false
+      end
+      if was_create then
+        log.info("created context " .. result.title)
+      else
+        log.info("updated context")
+      end
+      return true
+    end,
+    on_save = function(result)
+      if not apply_result(result) then
+        return false
+      end
+      return Context.SaveContext() == true
+    end,
+    on_move = function(item, on_done)
+      utils.transfer_reference(item, "move", on_done)
+    end,
+    on_copy = function(item)
+      utils.transfer_reference(item, "copy")
+    end,
+  })
+end
+
+--DONE
+function Context.EditContext()
+  open_context_form(false)
+end
+
+--DONE
+function Context.AddEditContextTitle()
+  Context.EditContext()
 end
 
 --DONE
@@ -598,28 +712,7 @@ end
 
 --DONE
 function Context.AddEditContextDescription()
-  local context = vim.fn.getqflist({ context = 0 }).context
-  local current_description = (type(context) == "table" and context.description) or ""
-  ---@type ReferenceBuffer
-  local referenceBuffer = {
-    default = current_description,
-    diagram_keymap = Context.Options.diagram.enabled and Context.Options.diagram.keymap or nil,
-    diagram_enabled = Context.Options.diagram.enabled,
-    diagram_snippets = Context.Options.diagram.enabled and Context.Options.diagram.snippets or nil,
-  }
-
-  buffer.open_reference_editor(referenceBuffer, function(description)
-    if description == nil then
-      return
-    end
-    local new_context = type(context) == "table" and vim.deepcopy(context) or {}
-    new_context.description = description
-    vim.fn.setqflist({}, "r", { context = new_context })
-    if Context.Options.trouble then
-      require("trouble").refresh("qflist")
-    end
-    log.info("added/updated context description")
-  end)
+  Context.EditContext()
 end
 
 --DONE

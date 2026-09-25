@@ -33,6 +33,10 @@
 ---@field description? string
 ---@field flows? ContextFlow[]
 ---@field active_flow? string
+---@field title_timestamp? string
+---@field title_git_hash? string
+---@field description_timestamp? string
+---@field description_git_hash? string
 
 ---@class ContextList
 ---@field id? number
@@ -43,6 +47,10 @@
 ---@field items? ContextItem[]
 ---@field git_hash? string
 ---@field timestamp string|osdate
+---@field title_timestamp? string
+---@field title_git_hash? string
+---@field description_timestamp? string
+---@field description_git_hash? string
 
 ---@class ContextItem
 ---@field id? number

@@ -41,6 +41,10 @@ local function get_db(root)
       type = "text",
       -- json: array of ContextFlow, e.g. {{title, items={{1,2},{3}}, description}}. Optional; NULL when unset.
       flows = "json",
+      title_timestamp = "text",
+      title_git_hash = "text",
+      description_timestamp = "text",
+      description_git_hash = "text",
     },
     items = {
       id = { type = "integer", primary = true },
@@ -76,6 +80,22 @@ local function get_db(root)
 
   pcall(function()
     d:eval("ALTER TABLE lists ADD COLUMN type text")
+  end)
+
+  pcall(function()
+    d:eval("ALTER TABLE lists ADD COLUMN title_timestamp text")
+  end)
+
+  pcall(function()
+    d:eval("ALTER TABLE lists ADD COLUMN title_git_hash text")
+  end)
+
+  pcall(function()
+    d:eval("ALTER TABLE lists ADD COLUMN description_timestamp text")
+  end)
+
+  pcall(function()
+    d:eval("ALTER TABLE lists ADD COLUMN description_git_hash text")
   end)
 
 
@@ -191,6 +211,10 @@ function M.insert_context(root, data, items)
     description = data.description or "",
     type = data.type or "context",
     flows = data.flows,
+    title_timestamp = data.title_timestamp,
+    title_git_hash = data.title_git_hash,
+    description_timestamp = data.description_timestamp,
+    description_git_hash = data.description_git_hash,
   })
 
   insert_items(root, list_id, items)
@@ -269,6 +293,18 @@ function M.update_context(root, updated_context, new_items, updated_items, title
   if updated_context.flows ~= nil then
     set.flows = updated_context.flows
   end
+  if updated_context.title_timestamp ~= nil then
+    set.title_timestamp = updated_context.title_timestamp
+  end
+  if updated_context.title_git_hash ~= nil then
+    set.title_git_hash = updated_context.title_git_hash
+  end
+  if updated_context.description_timestamp ~= nil then
+    set.description_timestamp = updated_context.description_timestamp
+  end
+  if updated_context.description_git_hash ~= nil then
+    set.description_git_hash = updated_context.description_git_hash
+  end
 
   if next(set) ~= nil then
     d.lists:update({ where = { id = list_id }, set = set })
@@ -330,6 +366,10 @@ function M.load_list(root, id)
       description = list.description,
       type = list.type or "context",
       flows = list.flows,
+      title_timestamp = list.title_timestamp,
+      title_git_hash = list.title_git_hash,
+      description_timestamp = list.description_timestamp,
+      description_git_hash = list.description_git_hash,
       items = items,
     }
   end)

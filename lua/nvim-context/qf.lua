@@ -111,6 +111,8 @@ local function diagram_enabled()
 end
 
 local function apply_viewer()
+   local held = utils.hold_qf_viewer and true or false
+   utils.hold_qf_viewer = false
    if not M.viewer_enabled then
       return
    end
@@ -131,6 +133,7 @@ local function apply_viewer()
       return
    end
    buffer.show_qf_follow(item, {
+      create = not held,
       diagram_enabled = diagram_enabled(),
       on_close = function()
          M.viewer_enabled = false
@@ -140,7 +143,11 @@ local function apply_viewer()
 end
 
 function M.maybe_show()
-   if scheduled or (not M.enabled and not M.viewer_enabled) then
+   if scheduled then
+      return
+   end
+   if not M.enabled and not M.viewer_enabled then
+      utils.hold_qf_viewer = false
       return
    end
    local info = vim.fn.getqflist({ id = 0, idx = 0, size = 0 })
@@ -156,6 +163,7 @@ function M.maybe_show()
          or (info.size > 0 and (info.id ~= last_id or info.idx ~= last_idx))
       )
    if not viewer_stale and not diff_stale then
+      utils.hold_qf_viewer = false
       return
    end
    scheduled = true
@@ -198,6 +206,7 @@ end
 function M.enable_viewer()
    M.viewer_enabled = true
    last_viewer_id, last_viewer_idx = nil, nil
+   utils.hold_qf_viewer = false
    apply_viewer()
 end
 

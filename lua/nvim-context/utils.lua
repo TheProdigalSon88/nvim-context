@@ -26,12 +26,26 @@ function Utils.qflist_to_context(context, previous_context)
       if ctx.flows ~= nil then
          result.flows = ctx.flows
       end
+      for _, key in ipairs({
+         "title_timestamp",
+         "title_git_hash",
+         "description_timestamp",
+         "description_git_hash",
+      }) do
+         if previous_context[key] ~= ctx[key] then
+            result[key] = ctx[key]
+         end
+      end
       new = false
    else
       result.description = ctx.description
       result.title = context.title
       result.type = ctx_type
       result.flows = ctx.flows
+      result.title_timestamp = ctx.title_timestamp
+      result.title_git_hash = ctx.title_git_hash
+      result.description_timestamp = ctx.description_timestamp
+      result.description_git_hash = ctx.description_git_hash
    end
    return new, result
 end
@@ -66,6 +80,22 @@ end
 ---@param root string
 ---@return ContextItem[],UpdateContextItem[]
 function Utils.qfitems_to_dbrows(items, previous_items, root)
+   --- Prefer stamps already on the item (the context editor sets them when that
+   --- note changed). Fall back to now only for items that never had one.
+   ---@param user_data table
+   ---@return string|nil, string|osdate
+   local function stamp_of(user_data)
+      local hash = user_data.git_hash
+      if type(hash) ~= "string" or hash == "" then
+         hash = Utils.git_hash()
+      end
+      local ts = user_data.timestamp
+      if ts == nil or ts == "" then
+         ts = os.date("!%Y-%m-%dT%H:%M:%SZ")
+      end
+      return hash, ts
+   end
+
    ---@type ContextItem[]
    local new_items = {}
    ---@type ContextItem[]
@@ -83,6 +113,7 @@ function Utils.qfitems_to_dbrows(items, previous_items, root)
          local user_data = type(item.user_data) == "table" and item.user_data or {}
 
          if not user_data.id then
+            local hash, ts = stamp_of(user_data)
             table.insert(new_items, {
                filename = normalize_qf_path(item, root),
                bufnr = item.bufnr,
@@ -93,41 +124,48 @@ function Utils.qfitems_to_dbrows(items, previous_items, root)
                description = user_data.description,
                base_text = user_data.base_text,
                display_text = user_data.display_text,
-               git_hash = Utils.git_hash(),
-               timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+               git_hash = hash,
+               timestamp = ts,
             })
          else
-            -- Existing item: compare description and range against previous
+            -- Existing item: stamp only when the note or range actually changed.
             local prev = prev_by_id[user_data.id]
             if prev then
-               local new_item = {
-                  id = user_data.id,
-                  git_hash = Utils.git_hash(),
-                  timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-               }
-
-               if user_data.description ~= prev.description then
+               local new_item = { id = user_data.id }
+               local changed = false
+               if (user_data.description or "") ~= (prev.description or "") then
                   new_item.description = user_data.description
+                  changed = true
                end
                if item.lnum ~= prev.lnum then
                   new_item.lnum = item.lnum
+                  changed = true
                end
                if item.end_lnum ~= prev.end_lnum then
                   new_item.end_lnum = item.end_lnum
+                  changed = true
                end
-               if user_data.base_text ~= prev.base_text then
+               if (user_data.base_text or "") ~= (prev.base_text or "") then
                   new_item.base_text = user_data.base_text
+                  changed = true
                end
-               if user_data.display_text ~= prev.display_text then
+               if (user_data.display_text or "") ~= (prev.display_text or "") then
                   new_item.display_text = user_data.display_text
+                  changed = true
                end
-               table.insert(updated_items, new_item)
+               if changed then
+                  local hash, ts = stamp_of(user_data)
+                  new_item.git_hash = hash
+                  new_item.timestamp = ts
+                  table.insert(updated_items, new_item)
+               end
             end
          end
       end
    else
       for _, item in ipairs(items) do
          local user_data = type(item.user_data) == "table" and item.user_data or {}
+         local hash, ts = stamp_of(user_data)
          table.insert(new_items, {
             filename = normalize_qf_path(item, root),
             bufnr = item.bufnr,
@@ -138,8 +176,8 @@ function Utils.qfitems_to_dbrows(items, previous_items, root)
             description = user_data.description,
             base_text = user_data.base_text,
             display_text = user_data.display_text,
-            git_hash = Utils.git_hash(),
-            timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+            git_hash = hash,
+            timestamp = ts,
          })
       end
    end
@@ -170,7 +208,7 @@ local function dbrows_to_qfitems(rows, root)
             base_text = row.base_text,
             display_text = row.display_text,
             git_hash = row.git_hash,
-            timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+            timestamp = row.timestamp,
          },
       }
       table.insert(items, item)
@@ -804,6 +842,10 @@ local function qf_context_from_list(data)
       id = data.id,
       type = Utils.list_type(data.type),
       flows = data.flows,
+      title_timestamp = data.title_timestamp,
+      title_git_hash = data.title_git_hash,
+      description_timestamp = data.description_timestamp,
+      description_git_hash = data.description_git_hash,
    }
 end
 
@@ -1209,6 +1251,9 @@ function Utils.apply_loaded(entry, action, opts)
    if not (opts and opts.keep_flow_parent) then
       Utils.flow_parent = nil
    end
+   -- Replacing the list resets qf idx to 1. That is not navigation; the follow
+   -- viewer must not open a split for the first item.
+   Utils.hold_qf_viewer = true
    vim.fn.setqflist({}, action, {
       title = entry.title,
       items = entry.items or {},
@@ -1339,6 +1384,14 @@ local function current_is_dirty()
          return true
       end
       if (ctx.description or "") ~= "" then
+         return true
+      end
+      -- A title-only unsaved list is dirty once the context editor has stamped it.
+      -- A plain quickfix list has no stamp, so it still does not prompt.
+      if type(ctx.title_timestamp) == "string" and ctx.title_timestamp ~= "" then
+         return true
+      end
+      if type(ctx.description_timestamp) == "string" and ctx.description_timestamp ~= "" then
          return true
       end
       if type(ctx.flows) == "table" and not vim.tbl_isempty(ctx.flows) then

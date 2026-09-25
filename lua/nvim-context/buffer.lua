@@ -1191,10 +1191,14 @@ end
 ---Show the current quickfix context item in a persistent readonly split.
 ---Does not steal focus. `winfixbuf` keeps `:cnext` / `:cprev` from replacing
 ---the window; contents update in place as the qf index changes.
+---`create = false` only refreshes an existing split and does not open one.
 ---@param item vim.quickfix.entry
----@param opts? { diagram_enabled?: boolean, on_close?: fun() }
+---@param opts? { diagram_enabled?: boolean, on_close?: fun(), create?: boolean }
 function Buffer.show_qf_follow(item, opts)
    opts = opts or {}
+   if opts.create == false and not follow_win_valid() then
+      return
+   end
    follow.on_close = opts.on_close
    follow.diagram_enabled = opts.diagram_enabled
 
@@ -1214,6 +1218,769 @@ function Buffer.show_qf_follow(item, opts)
       return
    end
    render_follow_diagrams()
+end
+
+---One markdown form for the context title, description, and item notes.
+---Headings, separators, and captured code are restored if edited. `:w` stays open.
+---@param opts {
+---   title?: string,
+---   description?: string,
+---   title_timestamp?: string,
+---   title_git_hash?: string,
+---   description_timestamp?: string,
+---   description_git_hash?: string,
+---   items?: vim.quickfix.entry[],
+---   diagram_enabled?: boolean,
+---   diagram_snippets?: table<string, string>,
+---   on_apply: fun(result: table): boolean,
+---   on_save: fun(result: table): boolean,
+---   on_move?: fun(item: vim.quickfix.entry, on_done: fun(success: boolean)),
+---   on_copy?: fun(item: vim.quickfix.entry),
+--- }
+function Buffer.open_context_editor(opts)
+   opts = opts or {}
+   if type(opts.on_apply) ~= "function" or type(opts.on_save) ~= "function" then
+      log.error("context editor: missing save callback")
+      return
+   end
+
+   ---@class ContextEditorEntry
+   ---@field seq integer
+   ---@field item vim.quickfix.entry
+   ---@field description string
+   ---@field heading string
+
+   ---@type ContextEditorEntry[]
+   local entries = {}
+   local snap_items = {}
+   for _, item in ipairs(opts.items or {}) do
+      if type(item.user_data) == "table" then
+         local seq = #entries + 1
+         local description = item.user_data.description or ""
+         entries[seq] = {
+            seq = seq,
+            item = item,
+            description = description,
+            heading = "",
+         }
+         snap_items[seq] = description
+      end
+   end
+
+   local state = {
+      title = opts.title or "",
+      description = opts.description or "",
+      title_timestamp = opts.title_timestamp,
+      title_git_hash = opts.title_git_hash,
+      description_timestamp = opts.description_timestamp,
+      description_git_hash = opts.description_git_hash,
+   }
+   local snap = {
+      title = state.title,
+      description = state.description,
+      items = snap_items,
+   }
+   ---@type ContextEditorEntry[]
+   local view_order = vim.list_extend({}, entries)
+   local sort_mode = "sequence"
+   local guarding = false
+   local bouncing = false
+   ---@type BufferSession|nil
+   local current
+   ---@type BufferView
+   local view
+
+   local function normalize_title(text)
+      return (text or ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+   end
+
+   local function normalize_body(text)
+      return (text or ""):match("^%s*(.-)%s*$") or ""
+   end
+
+   local function meta_suffix(ts, hash)
+      if type(ts) ~= "string" or ts == "" then
+         return nil
+      end
+      local shown = (type(hash) == "string" and hash ~= "") and hash or "no hash"
+      return format_timestamp(ts) .. " · " .. shown
+   end
+
+   local function title_heading()
+      local meta = meta_suffix(state.title_timestamp, state.title_git_hash)
+      if meta then
+         return "# Title · " .. meta
+      end
+      return "# Title"
+   end
+
+   local function desc_heading()
+      local meta = meta_suffix(state.description_timestamp, state.description_git_hash)
+      if meta then
+         return "# Description · " .. meta
+      end
+      return "# Description"
+   end
+
+   local function item_location(item)
+      -- getqflist() keeps the path on bufnr and omits filename.
+      local name = utils.qf_abspath(item) or ""
+      local root = require("nvim-context").root
+      if root and name ~= "" and name:sub(1, #root + 1) == root .. "/" then
+         name = name:sub(#root + 2)
+      elseif name ~= "" then
+         name = vim.fn.fnamemodify(name, ":.")
+      else
+         name = "unknown"
+      end
+      local start_line, end_line = utils.qf_range(item)
+      if end_line ~= start_line then
+         return string.format("%s:%d-%d", name, start_line, end_line)
+      end
+      return string.format("%s:%d", name, start_line)
+   end
+
+   local function fence_lang(item)
+      local bufnr = item.bufnr
+      if bufnr and bufnr > 0 and vim.api.nvim_buf_is_valid(bufnr) then
+         local ft = vim.bo[bufnr].filetype
+         if ft ~= "" then
+            return ft
+         end
+      end
+      local name = item.filename or ""
+      return name:match("%.([^./\\]+)$") or ""
+   end
+
+   local function item_heading(item)
+      local ud = type(item.user_data) == "table" and item.user_data or {}
+      local hash = (type(ud.git_hash) == "string" and ud.git_hash ~= "") and ud.git_hash or "no hash"
+      local ts = type(ud.timestamp) == "string" and ud.timestamp or nil
+      return "## " .. format_timestamp(ts) .. " · " .. hash .. " · " .. item_location(item)
+   end
+
+   ---Locked snapshot. A delimiter keeps description mermaid fences out of this block.
+   ---@param item vim.quickfix.entry
+   ---@return string[]|nil
+   local function code_block_lines(item)
+      local ud = type(item.user_data) == "table" and item.user_data or {}
+      local text = ud.base_text or ""
+      if text == "" then
+         return nil
+      end
+      local lines = { CODE_DELIMITER, "```" .. fence_lang(item) }
+      for line in (text .. "\n"):gmatch("(.-)\n") do
+         table.insert(lines, line)
+      end
+      table.insert(lines, "```")
+      return lines
+   end
+
+   local function append_text(lines, text)
+      table.insert(lines, "")
+      if text == nil or text == "" then
+         table.insert(lines, "")
+      else
+         for line in (text .. "\n"):gmatch("(.-)\n") do
+            table.insert(lines, line)
+         end
+      end
+      table.insert(lines, "")
+   end
+
+   local function render()
+      local lines = {}
+      table.insert(lines, title_heading())
+      append_text(lines, state.title)
+      table.insert(lines, desc_heading())
+      append_text(lines, state.description)
+      for i, entry in ipairs(view_order) do
+         table.insert(lines, "")
+         entry.heading = item_heading(entry.item)
+         table.insert(lines, entry.heading)
+         append_text(lines, entry.description)
+         local code = code_block_lines(entry.item)
+         if code then
+            vim.list_extend(lines, code)
+            table.insert(lines, "")
+         end
+         if i < #view_order then
+            table.insert(lines, "---")
+         end
+      end
+      if #lines == 0 then
+         lines = { "" }
+      end
+      return lines
+   end
+
+   local function find_line(lines, exact, from)
+      for i = from or 1, #lines do
+         if lines[i] == exact then
+            return i
+         end
+      end
+   end
+
+   local function section_body(lines, start_after, end_before)
+      local body = {}
+      for i = start_after + 1, end_before - 1 do
+         table.insert(body, lines[i])
+      end
+      while #body > 0 and body[1] == "" do
+         table.remove(body, 1)
+      end
+      while #body > 0 and (body[#body] == "" or body[#body] == "---") do
+         table.remove(body)
+      end
+      return table.concat(body, "\n")
+   end
+
+   ---@param lines string[]
+   ---@return { title: string, description: string, item_texts: string[] }|nil
+   local function parse(lines)
+      local title_i = find_line(lines, title_heading())
+      if not title_i then
+         return nil
+      end
+      local desc_i = find_line(lines, desc_heading(), title_i + 1)
+      if not desc_i then
+         return nil
+      end
+      local heading_at = {}
+      local search = desc_i + 1
+      for i, entry in ipairs(view_order) do
+         local at = find_line(lines, entry.heading, search)
+         if not at then
+            return nil
+         end
+         heading_at[i] = at
+         search = at + 1
+      end
+      local desc_end = heading_at[1] or (#lines + 1)
+      local item_texts = {}
+      for i, entry in ipairs(view_order) do
+         local start_at = heading_at[i]
+         local next_at = heading_at[i + 1] or (#lines + 1)
+         local body_end = next_at
+         local code = code_block_lines(entry.item)
+         if code then
+            local code_at = find_line(lines, CODE_DELIMITER, start_at + 1)
+            if not code_at or code_at >= next_at then
+               return nil
+            end
+            for j, line in ipairs(code) do
+               if lines[code_at + j - 1] ~= line then
+                  return nil
+               end
+            end
+            body_end = code_at
+         end
+         item_texts[i] = section_body(lines, start_at, body_end)
+      end
+      return {
+         title = section_body(lines, title_i, desc_i),
+         description = section_body(lines, desc_i, desc_end),
+         item_texts = item_texts,
+      }
+   end
+
+   local function locked_set(lines)
+      local locked = {}
+      local title_i = find_line(lines, title_heading())
+      local desc_i = title_i and find_line(lines, desc_heading(), title_i + 1)
+      if title_i then
+         locked[title_i] = true
+      end
+      if desc_i then
+         locked[desc_i] = true
+      end
+      local search = (desc_i or 0) + 1
+      for _, entry in ipairs(view_order) do
+         local at = find_line(lines, entry.heading, search)
+         if at then
+            locked[at] = true
+            search = at + 1
+         end
+      end
+      for i, line in ipairs(lines) do
+         if line == "---" then
+            locked[i] = true
+         end
+      end
+      local i = 1
+      while i <= #lines do
+         if lines[i] == CODE_DELIMITER then
+            local finish = i
+            local opened = false
+            for j = i + 1, #lines do
+               finish = j
+               if not opened and lines[j]:match("^```") then
+                  opened = true
+               elseif opened and lines[j] == "```" then
+                  break
+               end
+            end
+            if opened then
+               for j = i, finish do
+                  locked[j] = true
+               end
+               i = finish + 1
+            else
+               i = i + 1
+            end
+         else
+            i = i + 1
+         end
+      end
+      return locked
+   end
+
+   local function is_locked(lines, lnum)
+      return locked_set(lines)[lnum] == true
+   end
+
+   local function sort_view()
+      if sort_mode == "chronological" then
+         table.sort(view_order, function(a, b)
+            local ta = type(a.item.user_data) == "table" and a.item.user_data.timestamp or ""
+            local tb = type(b.item.user_data) == "table" and b.item.user_data.timestamp or ""
+            if ta ~= tb then
+               return ta > tb
+            end
+            return a.seq < b.seq
+         end)
+      else
+         table.sort(view_order, function(a, b)
+            return a.seq < b.seq
+         end)
+      end
+   end
+
+   local function is_dirty()
+      if normalize_title(state.title) ~= normalize_title(snap.title) then
+         return true
+      end
+      if normalize_body(state.description) ~= normalize_body(snap.description) then
+         return true
+      end
+      for _, entry in ipairs(entries) do
+         if normalize_body(entry.description) ~= normalize_body(snap.items[entry.seq] or "") then
+            return true
+         end
+      end
+      return false
+   end
+
+   local function editor_alive()
+      return current and not current.closing and current.views[#current.views] == view
+   end
+
+   local function render_diagrams()
+      if not editor_alive() or not opts.diagram_enabled or not vim.api.nvim_win_is_valid(current.win) then
+         return
+      end
+      pcall(vim.api.nvim_win_call, current.win, function()
+         clear_diagrams(current.win)
+         local ok, diagram = pcall(require, "diagram")
+         if ok then
+            diagram.render()
+         end
+      end)
+   end
+
+   ---@param preferred? integer
+   ---@param focus? ContextEditorEntry
+   local function refresh(preferred, focus)
+      if not editor_alive() then
+         return
+      end
+      local lines = render()
+      view.lines = lines
+      local target = preferred
+      if focus and focus.heading ~= "" then
+         local at = find_line(lines, focus.heading)
+         if at then
+            target = math.min(at + 1, #lines)
+         end
+      end
+      if target and (target < 1 or target > #lines) then
+         target = math.min(math.max(target, 1), #lines)
+      end
+      guarding = true
+      update_view(current, view, target and { target, 0 } or nil)
+      guarding = false
+      if not editor_alive() or not vim.api.nvim_buf_is_valid(current.buf) then
+         return
+      end
+      if target and is_locked(lines, target) then
+         local lnum = target
+         for delta = 1, #lines do
+            if lnum + delta <= #lines and not is_locked(lines, lnum + delta) then
+               lnum = lnum + delta
+               break
+            end
+            if lnum - delta >= 1 and not is_locked(lines, lnum - delta) then
+               lnum = lnum - delta
+               break
+            end
+         end
+         place_cursor(current.win, current.buf, { lnum, 0 })
+      end
+      vim.bo[current.buf].modified = is_dirty()
+      render_diagrams()
+   end
+
+   local function get_lines()
+      if not current or not vim.api.nvim_buf_is_valid(current.buf) then
+         return {}
+      end
+      return vim.api.nvim_buf_get_lines(current.buf, 0, -1, false)
+   end
+
+   local function capture()
+      local parsed = parse(get_lines())
+      if not parsed then
+         return nil
+      end
+      state.title = parsed.title
+      state.description = parsed.description
+      for i, entry in ipairs(view_order) do
+         entry.description = parsed.item_texts[i]
+      end
+      return parsed
+   end
+
+   local function reject_write()
+      if not current or not vim.api.nvim_buf_is_valid(current.buf) then
+         return
+      end
+      local buf = current.buf
+      vim.bo[buf].modified = false
+      vim.schedule(function()
+         if vim.api.nvim_buf_is_valid(buf) then
+            vim.bo[buf].modified = true
+         end
+      end)
+   end
+
+   ---@param to_db boolean
+   local function commit(to_db)
+      if not editor_alive() then
+         return
+      end
+      local parsed = capture()
+      if not parsed then
+         log.error("context editor: could not read the buffer")
+         refresh(vim.api.nvim_win_get_cursor(current.win)[1])
+         if to_db then
+            return
+         end
+         reject_write()
+         return
+      end
+      local title = normalize_title(parsed.title)
+      if title == "" then
+         log.error("context must have title")
+         if not to_db then
+            reject_write()
+         end
+         return
+      end
+      local description = normalize_body(parsed.description)
+      local now = os.date("!%Y-%m-%dT%H:%M:%SZ")
+      local hash = utils.git_hash()
+      local title_ts, title_hash = state.title_timestamp, state.title_git_hash
+      if title ~= normalize_title(snap.title) then
+         title_ts, title_hash = now, hash
+      end
+      local desc_ts, desc_hash = state.description_timestamp, state.description_git_hash
+      if description ~= normalize_body(snap.description) then
+         desc_ts, desc_hash = now, hash
+      end
+      local item_updates = {}
+      for _, entry in ipairs(entries) do
+         local text = normalize_body(entry.description)
+         local ud = type(entry.item.user_data) == "table" and entry.item.user_data or {}
+         local ts, gh = ud.timestamp, ud.git_hash
+         if text ~= normalize_body(snap.items[entry.seq] or "") then
+            ts, gh = now, hash
+         end
+         table.insert(item_updates, {
+            item = entry.item,
+            description = text,
+            timestamp = ts,
+            git_hash = gh,
+         })
+      end
+      local result = {
+         title = title,
+         description = description,
+         title_timestamp = title_ts,
+         title_git_hash = title_hash,
+         description_timestamp = desc_ts,
+         description_git_hash = desc_hash,
+         item_updates = item_updates,
+      }
+      local callback = to_db and opts.on_save or opts.on_apply
+      local ok, applied = pcall(callback, result)
+      if not ok then
+         log.error("context editor: " .. tostring(applied))
+         if not to_db then
+            reject_write()
+         end
+         return
+      end
+      if not applied then
+         if not to_db then
+            reject_write()
+         end
+         return
+      end
+      state.title = title
+      state.description = description
+      state.title_timestamp = title_ts
+      state.title_git_hash = title_hash
+      state.description_timestamp = desc_ts
+      state.description_git_hash = desc_hash
+      snap.title = title
+      snap.description = description
+      for _, upd in ipairs(item_updates) do
+         local ud = type(upd.item.user_data) == "table" and upd.item.user_data or {}
+         ud.description = upd.description
+         ud.timestamp = upd.timestamp
+         ud.git_hash = upd.git_hash
+         upd.item.user_data = ud
+      end
+      for _, entry in ipairs(entries) do
+         snap.items[entry.seq] = normalize_body(entry.description)
+         entry.description = snap.items[entry.seq]
+      end
+      if sort_mode == "chronological" then
+         sort_view()
+      end
+      local cursor_line = editor_alive() and vim.api.nvim_win_get_cursor(current.win)[1] or 2
+      refresh(cursor_line)
+      if editor_alive() and vim.api.nvim_buf_is_valid(current.buf) then
+         vim.bo[current.buf].modified = false
+      end
+   end
+
+   local function item_under_cursor()
+      if not editor_alive() then
+         return nil
+      end
+      local lnum = vim.api.nvim_win_get_cursor(current.win)[1]
+      local lines = get_lines()
+      local found
+      local search = 1
+      for _, entry in ipairs(view_order) do
+         local at = find_line(lines, entry.heading, search)
+         if at then
+            if at <= lnum then
+               found = entry
+            end
+            search = at + 1
+         end
+      end
+      return found
+   end
+
+   local function apply_note(entry)
+      local ud = type(entry.item.user_data) == "table" and entry.item.user_data or {}
+      ud.description = normalize_body(entry.description)
+      entry.item.user_data = ud
+   end
+
+   local sort_action = {
+      key = "s",
+      label = "sequence",
+      desc = "Toggle item order: sequence or newest timestamp",
+      callback = function()
+         if not capture() then
+            log.error("context editor: could not read the buffer")
+            refresh(editor_alive() and vim.api.nvim_win_get_cursor(current.win)[1] or 2)
+            return
+         end
+         local focused = item_under_cursor()
+         sort_mode = sort_mode == "sequence" and "chronological" or "sequence"
+         sort_action.label = sort_mode == "sequence" and "sequence" or "chronological"
+         sort_view()
+         refresh(nil, focused)
+      end,
+   }
+
+   local lines = render()
+   view = {
+      lines = lines,
+      cursor = { 2, 0 },
+      readonly = false,
+      writable = true,
+      diagram_enabled = opts.diagram_enabled and true or false,
+      close_desc = "Close context editor",
+      actions = {
+         sort_action,
+         {
+            key = "m",
+            label = "move",
+            desc = "Move the item under the cursor",
+            nowait = true,
+            silent = true,
+            callback = function()
+               if not opts.on_move then
+                  return
+               end
+               if not capture() then
+                  log.error("context editor: could not read the buffer")
+                  return
+               end
+               local entry = item_under_cursor()
+               if not entry then
+                  log.info("no item under cursor")
+                  return
+               end
+               apply_note(entry)
+               opts.on_move(entry.item, function(success)
+                  if not success or not editor_alive() then
+                     return
+                  end
+                  for i, candidate in ipairs(entries) do
+                     if candidate == entry then
+                        table.remove(entries, i)
+                        break
+                     end
+                  end
+                  for i, candidate in ipairs(view_order) do
+                     if candidate == entry then
+                        table.remove(view_order, i)
+                        break
+                     end
+                  end
+                  refresh(nil)
+               end)
+            end,
+         },
+         {
+            key = "c",
+            label = "copy",
+            desc = "Copy the item under the cursor",
+            nowait = true,
+            silent = true,
+            callback = function()
+               if not opts.on_copy then
+                  return
+               end
+               if not capture() then
+                  log.error("context editor: could not read the buffer")
+                  return
+               end
+               local entry = item_under_cursor()
+               if not entry then
+                  log.info("no item under cursor")
+                  return
+               end
+               apply_note(entry)
+               opts.on_copy(entry.item)
+            end,
+         },
+         {
+            key = "S",
+            label = "save",
+            desc = "Write context to the database",
+            callback = function()
+               commit(true)
+            end,
+         },
+      },
+      on_show = function(s)
+         current = s
+         vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
+            group = s.augroup,
+            buffer = s.buf,
+            callback = function()
+               if guarding or not editor_alive() then
+                  return
+               end
+               local parsed = parse(get_lines())
+               if not parsed then
+                  refresh(vim.api.nvim_win_get_cursor(s.win)[1])
+                  return
+               end
+               state.title = parsed.title
+               state.description = parsed.description
+               for i, entry in ipairs(view_order) do
+                  entry.description = parsed.item_texts[i]
+               end
+            end,
+         })
+         vim.api.nvim_create_autocmd({ "InsertEnter", "CursorMovedI" }, {
+            group = s.augroup,
+            buffer = s.buf,
+            callback = function()
+               if guarding or bouncing or not editor_alive() or not vim.api.nvim_win_is_valid(s.win) then
+                  return
+               end
+               local buf_lines = get_lines()
+               local lnum = vim.api.nvim_win_get_cursor(s.win)[1]
+               if not is_locked(buf_lines, lnum) then
+                  return
+               end
+               local target
+               for delta = 1, #buf_lines do
+                  if lnum + delta <= #buf_lines and not is_locked(buf_lines, lnum + delta) then
+                     target = lnum + delta
+                     break
+                  end
+                  if lnum - delta >= 1 and not is_locked(buf_lines, lnum - delta) then
+                     target = lnum - delta
+                     break
+                  end
+               end
+               if not target or target == lnum then
+                  return
+               end
+               bouncing = true
+               vim.api.nvim_win_set_cursor(s.win, { target, 0 })
+               bouncing = false
+            end,
+         })
+         vim.api.nvim_create_autocmd("BufWriteCmd", {
+            group = s.augroup,
+            buffer = s.buf,
+            callback = function()
+               commit(false)
+            end,
+         })
+         if opts.diagram_snippets then
+            for keymap_str, diagram_type in pairs(opts.diagram_snippets) do
+               local template = MERMAID_SNIPPETS[diagram_type]
+               if template then
+                  bind_map(s, keymap_str, function()
+                     local buf_lines = get_lines()
+                     local lnum = vim.api.nvim_win_get_cursor(0)[1]
+                     if is_locked(buf_lines, lnum) then
+                        log.info("that section is locked")
+                        return
+                     end
+                     local block = { "```mermaid" }
+                     vim.list_extend(block, template)
+                     table.insert(block, "```")
+                     vim.api.nvim_buf_set_lines(s.buf, lnum, lnum, false, block)
+                     vim.api.nvim_win_set_cursor(0, { lnum + 1, 0 })
+                     render_diagrams()
+                  end, { desc = "Insert " .. diagram_type .. " diagram" })
+               end
+            end
+         end
+         if opts.diagram_enabled then
+            vim.schedule(function()
+               render_diagrams()
+            end)
+         end
+      end,
+   }
+
+   open_view(view)
 end
 
 return Buffer
