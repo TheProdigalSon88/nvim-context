@@ -10,7 +10,7 @@ Diff.ns = vim.api.nvim_create_namespace("nvim-context.diff")
 ---@param ns? number
 function Diff.clear(buf, ns)
    if buf and vim.api.nvim_buf_is_valid(buf) then
-      vim.api.nvim_buf_clear_namespace(buf, ns or M.ns, 0, -1)
+      vim.api.nvim_buf_clear_namespace(buf, ns or Diff.ns, 0, -1)
    end
 end
 
@@ -34,7 +34,7 @@ function Diff.preview_item(buf, item, ns)
       return false
    end
    local start_line = utils.qf_range(item)
-   M.apply_range_marks(buf, ns, start_line, diff)
+   Diff.apply_range_marks(buf, ns, start_line, diff)
    return true
 end
 
