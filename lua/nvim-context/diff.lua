@@ -1,13 +1,14 @@
 local utils = require("nvim-context.utils")
+local styling = require("nvim-context.styling")
 
-local M = {}
+local Diff = {}
 
-M.ns = vim.api.nvim_create_namespace("nvim-context.diff")
+Diff.ns = vim.api.nvim_create_namespace("nvim-context.diff")
 
 
 ---@param buf number
 ---@param ns? number
-function M.clear(buf, ns)
+function Diff.clear(buf, ns)
    if buf and vim.api.nvim_buf_is_valid(buf) then
       vim.api.nvim_buf_clear_namespace(buf, ns or M.ns, 0, -1)
    end
@@ -17,7 +18,7 @@ end
 ---@param item vim.quickfix.entry
 ---@param ns number
 ---@return boolean applied
-function M.preview_item(buf, item, ns)
+function Diff.preview_item(buf, item, ns)
    if not buf or not vim.api.nvim_buf_is_valid(buf) then
       return false
    end
@@ -41,7 +42,7 @@ end
 ---@param ns number
 ---@param start_line number
 ---@param diff RangeDiff
-function M.apply_range_marks(buf, ns, start_line, diff)
+function Diff.apply_range_marks(buf, ns, start_line, diff)
    if not buf or not vim.api.nvim_buf_is_valid(buf) or not diff then
       return
    end
@@ -98,4 +99,8 @@ function M.apply_range_marks(buf, ns, start_line, diff)
    end
 end
 
-return M
+function Diff.setup_diff()
+   styling.setup_highlight_diff()
+end
+
+return Diff

@@ -2,6 +2,7 @@ local log = require("nvim-context.log")
 local utils = require("nvim-context.utils")
 local qfix = require("nvim-context.qf")
 local trouble = require("nvim-context.trouble")
+local styling = require("nvim-context.styling")
 
 local Setup = {}
 
@@ -49,30 +50,6 @@ function Setup.setup_diagram_plugins(context)
    })
 end
 
-local function setup_highlight_diff()
-   local link = "DiffDelete"
-   if vim.fn.hlexists("MiniDiffOverDelete") == 1 then
-      link = "MiniDiffOverDelete"
-   end
-   vim.api.nvim_set_hl(0, "NvimContextChanged", {
-      link = link,
-   })
-end
-
-local highlight_group_diff
-
-function Setup.setup_diff()
-   setup_highlight_diff()
-   if highlight_group_diff then
-      return
-   end
-   highlight_group_diff = vim.api.nvim_create_augroup("NvimContextDiff", { clear = true })
-   vim.api.nvim_create_autocmd("ColorScheme", {
-      group = highlight_group_diff,
-      callback = setup_highlight_diff,
-   })
-end
-
 function Setup.setup_qf()
    qfix.enabled = true
    qfix.viewer_enabled = true
@@ -90,7 +67,7 @@ function Setup.setup_trouble()
       return
    end
 
-   setup_highlight_diff()
+   styling.setup_highlight_diff()
    qf.preview = trouble.preview_context_item
 
    local group = vim.api.nvim_create_augroup("NvimContextTrouble", { clear = true })
