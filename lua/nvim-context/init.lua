@@ -321,7 +321,8 @@ end
 
 --DONE
 ---@param create boolean
-function open_context_form(create)
+---@param focus_item? vim.quickfix.entry
+function open_context_form(create, focus_item)
   if not Context.root then
     Context.root = vim.fs.root(0, ".git")
     if not Context.root then
@@ -419,6 +420,7 @@ function open_context_form(create)
     description_timestamp = description_timestamp,
     description_git_hash = description_git_hash,
     items = items,
+    focus_item = focus_item,
     diagram_enabled = diagram_enabled,
     diagram_snippets = diagram_enabled and diagram.snippets or nil,
     on_apply = function(result)
@@ -449,13 +451,14 @@ function open_context_form(create)
 end
 
 --DONE
-function Context.EditContext()
-  open_context_form(false)
+function Context.EditContext(arg1, arg2)
+  local _, item = utils.resolve_list_item(arg1, arg2)
+  open_context_form(false, item)
 end
 
 --DONE
-function Context.AddEditContextTitle()
-  Context.EditContext()
+function Context.AddEditContextTitle(arg1, arg2)
+  Context.EditContext(arg1, arg2)
 end
 
 --DONE
@@ -711,8 +714,8 @@ function Context.ActivateItemFlow(arg1, arg2)
 end
 
 --DONE
-function Context.AddEditContextDescription()
-  Context.EditContext()
+function Context.AddEditContextDescription(arg1, arg2)
+  Context.EditContext(arg1, arg2)
 end
 
 --DONE
@@ -1025,7 +1028,7 @@ function Context.EditTroubleItemNote(ctx)
       log.error("could not locate context reference")
       return
     end
-    Context.EditReference(idx)
+    Context.EditContext(ctx)
   else
     log.info("trouble not enabled")
   end

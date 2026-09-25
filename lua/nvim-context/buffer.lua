@@ -1230,6 +1230,7 @@ end
 ---   description_timestamp?: string,
 ---   description_git_hash?: string,
 ---   items?: vim.quickfix.entry[],
+---   focus_item?: vim.quickfix.entry,
 ---   diagram_enabled?: boolean,
 ---   diagram_snippets?: table<string, string>,
 ---   on_apply: fun(result: table): boolean,
@@ -1540,6 +1541,21 @@ function Buffer.open_context_editor(opts)
       return locked_set(lines)[lnum] == true
    end
 
+   local function nearest_unlocked(lines, lnum)
+      if not is_locked(lines, lnum) then
+         return lnum
+      end
+      for delta = 1, #lines do
+         if lnum + delta <= #lines and not is_locked(lines, lnum + delta) then
+            return lnum + delta
+         end
+         if lnum - delta >= 1 and not is_locked(lines, lnum - delta) then
+            return lnum - delta
+         end
+      end
+      return lnum
+   end
+
    local function sort_view()
       if sort_mode == "chronological" then
          table.sort(view_order, function(a, b)
@@ -1614,18 +1630,7 @@ function Buffer.open_context_editor(opts)
          return
       end
       if target and is_locked(lines, target) then
-         local lnum = target
-         for delta = 1, #lines do
-            if lnum + delta <= #lines and not is_locked(lines, lnum + delta) then
-               lnum = lnum + delta
-               break
-            end
-            if lnum - delta >= 1 and not is_locked(lines, lnum - delta) then
-               lnum = lnum - delta
-               break
-            end
-         end
-         place_cursor(current.win, current.buf, { lnum, 0 })
+         place_cursor(current.win, current.buf, { nearest_unlocked(lines, target), 0 })
       end
       vim.bo[current.buf].modified = is_dirty()
       render_diagrams()
@@ -1811,9 +1816,41 @@ function Buffer.open_context_editor(opts)
    }
 
    local lines = render()
+   local section_top
+   local function focus_cursor(rendered)
+      if type(opts.focus_item) ~= "table" then
+         return { 2, 0 }
+      end
+      local items = {}
+      for i, entry in ipairs(entries) do
+         items[i] = entry.item
+      end
+      local idx = utils.find_qf_index(items, opts.focus_item)
+      local focused = idx and entries[idx]
+      if not focused then
+         return { 2, 0 }
+      end
+      local search = 1
+      local at
+      for _, entry in ipairs(view_order) do
+         local found = find_line(rendered, entry.heading, search)
+         if entry == focused then
+            at = found
+            break
+         end
+         if found then
+            search = found + 1
+         end
+      end
+      if not at then
+         return { 2, 0 }
+      end
+      section_top = at
+      return { nearest_unlocked(rendered, math.min(at + 1, #rendered)), 0 }
+   end
    view = {
       lines = lines,
-      cursor = { 2, 0 },
+      cursor = focus_cursor(lines),
       readonly = false,
       writable = true,
       diagram_enabled = opts.diagram_enabled and true or false,
@@ -1894,6 +1931,19 @@ function Buffer.open_context_editor(opts)
       },
       on_show = function(s)
          current = s
+         local function reveal_section()
+            if not section_top or not vim.api.nvim_win_is_valid(s.win) then
+               return
+            end
+            pcall(vim.api.nvim_win_call, s.win, function()
+               local cursor = vim.api.nvim_win_get_cursor(s.win)
+               vim.api.nvim_win_set_cursor(s.win, { section_top, 0 })
+               vim.cmd("normal! zt")
+               vim.api.nvim_win_set_cursor(s.win, cursor)
+               vim.fn.winrestview({ topline = section_top, lnum = cursor[1], col = cursor[2] })
+            end)
+         end
+         reveal_section()
          vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
             group = s.augroup,
             buffer = s.buf,
@@ -1972,11 +2022,12 @@ function Buffer.open_context_editor(opts)
                end
             end
          end
-         if opts.diagram_enabled then
-            vim.schedule(function()
-               render_diagrams()
-            end)
-         end
+          if opts.diagram_enabled then
+             vim.schedule(function()
+                render_diagrams()
+                reveal_section()
+             end)
+          end
       end,
    }
 
