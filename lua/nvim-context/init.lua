@@ -16,6 +16,22 @@ local diff = require("nvim-context.diff")
 local STACK_TYPES = { "context", "flow" }
 
 local open_context_form
+local focus_current_qf_item
+
+local function bind_qf_context(key, direction)
+  vim.keymap.set("n", key, function()
+    local ok, bracketed = pcall(require, "mini.bracketed")
+    if ok and type(bracketed.quickfix) == "function" then
+      bracketed.quickfix(direction)
+    else
+      pcall(vim.cmd, direction == "forward" and "silent! cnext" or "silent! cprev")
+    end
+    focus_current_qf_item()
+  end, {
+    desc = direction == "forward" and "Next context item" or "Previous context item",
+    silent = true,
+  })
+end
 
 --DONE
 function Context.setup(opts)
@@ -28,6 +44,11 @@ function Context.setup(opts)
   if Context.Options.trouble then
     setup.setup_trouble()
   end
+  -- After other startup maps (mini.bracketed) so [q / ]q keep the jump and open the editor.
+  vim.schedule(function()
+    bind_qf_context("]q", "forward")
+    bind_qf_context("[q", "backward")
+  end)
 end
 
 function Context.AddReference()
@@ -448,6 +469,26 @@ function open_context_form(create, focus_item)
       utils.transfer_reference(item, "copy")
     end,
   })
+end
+
+function focus_current_qf_item()
+  local info = vim.fn.getqflist({ idx = 0, size = 0, context = 0 })
+  if info.size == 0 then
+    return
+  end
+  local ctx = type(info.context) == "table" and info.context or {}
+  if utils.is_flow_view(ctx) then
+    return
+  end
+  local item = vim.fn.getqflist()[info.idx]
+  if not utils.is_context_item(item) then
+    return
+  end
+  if buffer.context_editor_open() then
+    buffer.focus_context_item(item)
+    return
+  end
+  open_context_form(false, item)
 end
 
 --DONE

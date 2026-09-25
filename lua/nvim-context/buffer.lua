@@ -101,6 +101,25 @@ end
 ---@type BufferSession|nil
 local session
 
+---Set while the context editor is the visible view. Cleared on hide.
+---@type fun(item: vim.quickfix.entry): boolean|nil
+local context_editor_focus
+
+---@return boolean
+function Buffer.context_editor_open()
+   return type(context_editor_focus) == "function"
+end
+
+---Scroll the visible context editor to `item`. Does not open or rewrite it.
+---@param item vim.quickfix.entry
+---@return boolean scrolled
+function Buffer.focus_context_item(item)
+   if type(context_editor_focus) ~= "function" then
+      return false
+   end
+   return context_editor_focus(item) == true
+end
+
 local shutdown
 local apply_view
 local pop_view
@@ -1817,36 +1836,78 @@ function Buffer.open_context_editor(opts)
 
    local lines = render()
    local section_top
-   local function focus_cursor(rendered)
-      if type(opts.focus_item) ~= "table" then
-         return { 2, 0 }
-      end
+
+   ---@param item vim.quickfix.entry
+   ---@return ContextEditorEntry|nil
+   local function entry_for_item(item)
       local items = {}
       for i, entry in ipairs(entries) do
          items[i] = entry.item
       end
-      local idx = utils.find_qf_index(items, opts.focus_item)
-      local focused = idx and entries[idx]
-      if not focused then
-         return { 2, 0 }
+      local idx = utils.find_qf_index(items, item)
+      return idx and entries[idx] or nil
+   end
+
+   ---@param rendered string[]
+   ---@param focused ContextEditorEntry
+   ---@return integer|nil
+   local function heading_line(rendered, focused)
+      if focused.heading == "" then
+         return nil
       end
       local search = 1
-      local at
       for _, entry in ipairs(view_order) do
          local found = find_line(rendered, entry.heading, search)
          if entry == focused then
-            at = found
-            break
+            return found
          end
          if found then
             search = found + 1
          end
       end
+   end
+
+   local function focus_cursor(rendered)
+      if type(opts.focus_item) ~= "table" then
+         return { 2, 0 }
+      end
+      local focused = entry_for_item(opts.focus_item)
+      local at = focused and heading_line(rendered, focused)
       if not at then
          return { 2, 0 }
       end
       section_top = at
       return { nearest_unlocked(rendered, math.min(at + 1, #rendered)), 0 }
+   end
+
+   ---Scroll the open editor to `item` without rewriting the buffer.
+   ---@param item vim.quickfix.entry
+   ---@return boolean
+   local function scroll_to_item(item)
+      if not editor_alive() or type(item) ~= "table" then
+         return false
+      end
+      local focused = entry_for_item(item)
+      if not focused then
+         return false
+      end
+      local rendered = get_lines()
+      local at = heading_line(rendered, focused)
+      if not at or not vim.api.nvim_win_is_valid(current.win) then
+         return false
+      end
+      local cursor_line = nearest_unlocked(rendered, math.min(at + 1, #rendered))
+      local win = current.win
+      pcall(vim.api.nvim_win_call, win, function()
+         vim.api.nvim_win_set_cursor(win, { at, 0 })
+         vim.cmd("normal! zt")
+         vim.api.nvim_win_set_cursor(win, { cursor_line, 0 })
+         vim.fn.winrestview({ topline = at, lnum = cursor_line, col = 0 })
+      end)
+      if vim.api.nvim_get_current_win() ~= win then
+         pcall(vim.api.nvim_set_current_win, win)
+      end
+      return true
    end
    view = {
       lines = lines,
@@ -1929,8 +1990,14 @@ function Buffer.open_context_editor(opts)
             end,
          },
       },
+      on_hide = function()
+         if context_editor_focus == scroll_to_item then
+            context_editor_focus = nil
+         end
+      end,
       on_show = function(s)
          current = s
+         context_editor_focus = scroll_to_item
          local function reveal_section()
             if not section_top or not vim.api.nvim_win_is_valid(s.win) then
                return
